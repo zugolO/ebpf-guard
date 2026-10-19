@@ -8,13 +8,14 @@
 #   cpu-idle86  8.6.1   сторож «не хуже ночи 8.6»: idle ≤ 0,6 × ночь 8.5 (0,0529), прежняя формула
 #   cpu-event   8.7.1   CPU на событие под пакетом (поды этой ночи, медиана ≥ 5) ≤ 0,6 × ночь 8.5 (82,3 мкс), без смягчения
 #                       (решение 6 владельца 16.10); цена раскладывается по event_type из cpu-*.pprof (справочно)
-#   sched       8.7.3   доля планировщика Go (findRunnable cum) в idle-профилях ≤ 15%
+#   sched       8.7.3   с волны 9 (В2): секунды планировщика Go (findRunnable cum) на 270 с ≤ 1,14 (0,8 × 1,43 ночи 8.6); доля — справка
 #   rule-eval   8.6.3а  секунды RuleEngine.EvaluateInto в idle-профилях ночи на 270 с ≤ 3,96 (сторож «не хуже ночи 8.6»)
 #   bench       8.6.3б  бенч G0 на дампе w86-b ≤ 0,42 × базы; sha бинаря сверяется
 #   detect      8.7.4   состав детекта алерт-в-алерт против ночи 8.6 (реестр new-rules.txt по ДАТЕ) + 14 живых контролей
 #                       + тождество на дампе (список тестов IDENT_TESTS)
 #   pod-median  8.7.5   ringbuf_to_router fileaccess пода, медиана ≥ 5 прогонов ЭТОЙ ночи ≤ 7 122,5
 #   pod-peak    8.6.6   Д6′: пик пода (медиана пиков) ≤ медианы пиков пяти прогонов ночи 8.6 (143,5), считается из архива
+#   pod-peak128 9.2     (волна 9, Д15) цель Д2: медиана пиков пода core (rego_active=0) ≤ 128 МиБ; прогон с Rego в зачёт не идёт
 #   mem-slice   8.2.2   Д3′: memory.current − карты P1 на 30-й минуте КАЖДОГО прогона пода, медиана ≥ 5 ≤ 120
 #   chain       8.5.5   Д12′: доля инцидентов с process_chain БЕЗ root_pid == 1, одинаково в базе и в ночи (прежняя — справочно)
 #   prof        8.7.6   профили под пакетом (хост и каждый под) и block/mutex-профиль в архиве, ≥ 1000 сэмплов CPU на прогон
@@ -194,24 +195,41 @@ sched_abs() {
     awk -v cs="$cn_s" -v bs="$bn_s" -v cp="$cp" -v bp="$bp" -v fn="$SCHED_FN" -v n="$NORM_SECS" 'BEGIN {
         printf "  СПРАВОЧНО (Е3): %s на %d с: ночь %.2f с (доля %s%%), база того же прибора %.2f с (доля %s%%); секунды к базе %.2f, доля к базе %.2f\n", fn, n, cs, cp, bs, bp, cs / bs, cp / bp }'
 }
+# Волна 9, В2 (решение владельца 18.10.2026): 8.7.3 судится СЕКУНДАМИ findRunnable cum на 270 с, не долей. Доля врёт там,
+# где падает знаменатель (Е3: ночь 8.7 — секунды −32%, доля 24,7% → 23,0%). Порог SEC_MAX = SEC_FRAC × BASE_SEC_EXPECT
+# = 0,8 × 1,43 = 1,14 с; 1,43 — секунды ТОГО ЖЕ прибора на idle-профилях ночи 8.6. База из архива (BASE_IDLE) сверяется с
+# объявленной константой (±2%): не сошлась — НЕИЗМЕРИМ (порог считан от другой базы). Доля печатается справкой.
+SEC_FRAC=${SEC_FRAC:-0.8}; BASE_SEC_EXPECT=${BASE_SEC_EXPECT:-1.43}; SEC_MAX=${SEC_MAX:-1.14}
 sched() {
-    echo "== w87 8.7.3: IDLE=${IDLE:-—} предел доли $SCHED_FN cum ≤ ${SCHED_MAX}% (ночь 8.6: ≈ 29%)"
-    local cls="" fail="" profs n out pct tot
-    mapfile -t profs < <(ls "$IDLE"/snapshots/cpu-*.pprof 2>/dev/null | sort)
-    n=${#profs[@]}
+    echo "== w87 8.7.3 (волна 9, В2): IDLE=${IDLE:-—} предел секунд $SCHED_FN cum на ${NORM_SECS} с ≤ ${SEC_MAX} (= ${SEC_FRAC} × ${BASE_SEC_EXPECT} базы ночи 8.6); доля — справкой (прежний предел ${SCHED_MAX}%)"
+    local cls="" fail="" cur cp cs cd cn cn_s
     command -v go > /dev/null 2>&1 || cls="$cls; нет go в PATH — профиль не разобрать"
-    [ "$n" -ge "$PROF_MIN" ] || cls="$cls; профилей $n < $PROF_MIN (снимает idle-run.sh при CPU_PROFILE_EVERY)"
+    local nprof; nprof=$(ls "$IDLE"/snapshots/cpu-*.pprof 2>/dev/null | wc -l | tr -d ' ')
+    [ "$nprof" -ge "$PROF_MIN" ] || cls="$cls; профилей $nprof < $PROF_MIN (снимает idle-run.sh при CPU_PROFILE_EVERY)"
     if [ -z "$cls" ]; then
-        out=$(go tool pprof -top -cum -nodecount=600 "${profs[@]}" 2> /dev/null)
-        tot=$(printf '%s\n' "$out" | sed -n 's/^Duration: .*Total samples = \([0-9.]*[a-z]*\).*/\1/p' | head -1)
-        pct=$(printf '%s\n' "$out" | awk -v fn="$SCHED_FN" '$NF == fn { v = $5; sub(/%/, "", v); print v; exit }')
-        if [ -z "$tot" ] || [ -z "$pct" ]; then
-            cls="$cls; в сведённом профиле нет итога (${tot:-—}) или узла $SCHED_FN (${pct:-—}) — профиль не от агента или pprof не разобрал"
+        cur=$(_sched_abs "$IDLE")
+        if [ -z "$cur" ]; then
+            cls="$cls; в сведённом профиле нет узла $SCHED_FN — профиль не от агента или pprof не разобрал"
         else
-            echo "  профилей $n, всего сэмплов $tot; $SCHED_FN cum ${pct}%"
-            sched_abs
-            awk -v v="$pct" -v l="$SCHED_MAX" 'BEGIN { exit !(v <= l) }' || fail="$fail; доля планировщика ${pct}% > ${SCHED_MAX}%"
-            verdict 8.7.3 "$fail" "$cls" "$SCHED_FN cum ${pct}% ≤ ${SCHED_MAX}% по $n профилям (${tot})"
+            read -r cp cs cd cn <<< "$cur"
+            cn_s=$(awk -v c="$cs" -v d="$cd" -v n="$NORM_SECS" 'BEGIN { printf "%.2f", c * n / d }')
+            echo "  профилей $cn, $SCHED_FN cum ${cs} с за ${cd} с профилей = ${cn_s} с на ${NORM_SECS} с (доля ${cp}% — справка)"
+            if [ -n "${BASE_IDLE:-}" ]; then
+                sched_abs
+                local base bp bs bd bn bn_s
+                base=$(_sched_abs "$BASE_IDLE")
+                if [ -z "$base" ]; then cls="$cls; база $BASE_IDLE — меньше $PROF_MIN idle-профилей или нет узла, объявленная база $BASE_SEC_EXPECT с не сверена"
+                else
+                    read -r bp bs bd bn <<< "$base"
+                    bn_s=$(awk -v c="$bs" -v d="$bd" -v n="$NORM_SECS" 'BEGIN { printf "%.2f", c * n / d }')
+                    awk -v b="$bn_s" -v e="$BASE_SEC_EXPECT" 'BEGIN { d = (b - e) / e; if (d < 0) d = -d; exit !(d <= 0.02) }' \
+                        || cls="$cls; база из архива $bn_s с не сходится с объявленной $BASE_SEC_EXPECT с (±2%) — порог $SEC_MAX считан не от ночи 8.6"
+                fi
+            else
+                echo "  СПРАВОЧНО: базы того же прибора не задано (BASE_IDLE) — судит объявленная константа $SEC_MAX с = $SEC_FRAC × $BASE_SEC_EXPECT"
+            fi
+            awk -v v="$cn_s" -v l="$SEC_MAX" 'BEGIN { exit !(v <= l + 1e-9) }' || fail="$fail; $SCHED_FN cum ${cn_s} с на ${NORM_SECS} с > ${SEC_MAX} с (доля ${cp}%)"
+            verdict 8.7.3 "$fail" "$cls" "$SCHED_FN cum ${cn_s} с на ${NORM_SECS} с ≤ ${SEC_MAX} с = ${SEC_FRAC} × ${BASE_SEC_EXPECT}; доля ${cp}% — справка; по ${cn} профилям"
             return
         fi
     fi
@@ -546,6 +564,39 @@ pod_peak() {
     verdict 8.6.6 "$fail" "$cls" "медиана пиков пода ≤ ${bp:-?} МиБ (медиана пяти прогонов ночи 8.6), BPF карты+кольца ${nb:-?} ≤ ${bb:-?} МиБ"
 }
 
+# ── 9.2 (волна 9, В1/Д15): цель Д2 «пик пода 128 МиБ» возвращается строкой критерия при Rego off ──
+# Решение владельца 18.10.2026: Rego — опция сборки full, core (умолчание образа и чарта) идёт без движка и с policy.rego
+# выключенным; 14.10 цель 128 была снята «пока», вернуться — если Д15 сделает Rego опциональным (plan.md, Д2). Судится
+# МЕДИАНА пиков пяти прогонов пода (как 8.6.6: max(старт, атаки) по memory.current), предел POD_PEAK_MAX = 128 МиБ.
+# Прогон засчитывается ТОЛЬКО при выключенном Rego, и это читается из РАНТАЙМА, не из конфига: серия
+# ebpf_guard_runtime_flag{flag="rego_active"} в m-att1.txt прогона (0 — core; 1 — Rego считан и память пода
+# другая; нет серии — бинарь до волны 9, состояние неизвестно). Прогон с Rego в зачёт не идёт и называется:
+# 128 МиБ с Rego цель не про него (его память судит 8.6.6 против базы 8.6).
+POD_PEAK_MAX=${POD_PEAK_MAX:-128}
+pod_peak128() {
+    echo "== w9 9.2 (Д2 при Д15): POD_RUNS=${POD_RUNS:-—}; медиана пиков пяти прогонов core (rego_active=0) ≤ ${POD_PEAK_MAX} МиБ"
+    local cls="" fail="" k=0 n=0 peaks="" pair att rf pm
+    for pair in $POD_RUNS; do
+        k=$((k + 1)); att=${pair#*:}
+        rf=$(_m "$att/m-att1.txt" ebpf_guard_runtime_flag 'flag="rego_active"')
+        if [ -z "$rf" ]; then cls="$cls; прогон $k: нет серии runtime_flag{flag=\"rego_active\"} (бинарь до волны 9 — Rego выключен или нет, не известно)"; continue; fi
+        if awk -v v="$rf" 'BEGIN { exit !(v != 0) }'; then cls="$cls; прогон $k: Rego ВКЛЮЧЁН (rego_active=1) — цель 128 судится на core (Д15), прогон не засчитан"; continue; fi
+        pm=$(_pod_peaks "$pair")
+        if [ -z "$pm" ]; then cls="$cls; прогон $k: нет сэмплов memory.current (старт/атаки)"; continue; fi
+        n=$((n + 1)); peaks="$peaks$pm"$'\n'
+        echo "  прогон $k (rego_active=0): пик memory.current $pm МиБ"
+    done
+    [ "$n" -ge "$POD_MIN_RUNS" ] || cls="$cls; засчитанных прогонов core $n < $POD_MIN_RUNS"
+    if [ "$n" -ge "$POD_MIN_RUNS" ]; then
+        local med mx; med=$(printf '%s' "$peaks" | _median); mx=$(printf '%s' "$peaks" | sort -n | tail -1)
+        echo "  пик: медиана $med МиБ, наибольший $mx МиБ, разброс $(printf '%s' "$peaks" | sort -n | awk 'NR == 1 { lo = $1 } { hi = $1 } END { printf "%.1f", hi - lo }') МиБ; предел $POD_PEAK_MAX МиБ (судится медиана; наибольший — справочно)"
+        awk -v m="$med" -v l="$POD_PEAK_MAX" 'BEGIN { exit !(m <= l) }' || fail="$fail; медиана пиков $med МиБ > ${POD_PEAK_MAX}"
+        verdict 9.2 "$fail" "$cls" "медиана пиков пода $med МиБ ≤ ${POD_PEAK_MAX} МиБ по $n прогонам core (rego_active=0)"
+        return
+    fi
+    verdict 9.2 "$fail" "$cls" ""
+}
+
 # ── 8.5.5 (Д12′): доля с process_chain БЕЗ инцидентов root_pid == 1 ────────────
 # Решение 2 владельца 16.10: у pid 1 нет предка по построению (память chain-share-denominator-holds-pid1), он
 # в знаменателе и базы, и ночи одинаково держит долю ниже 100%. Фильтр один и тот же в базе и в ночи; прежняя доля
@@ -698,11 +749,12 @@ case "$MODE" in
     detect) detect ;;
     pod-median) pod_median ;;
     pod-peak) pod_peak ;;
+    pod-peak128) pod_peak128 ;;
     mem-slice) mem_slice ;;
     chain) chain ;;
     prof) prof ;;
     memsplit) memsplit ;;
     ref-811) ref_811 ;;
     dlist) dlist ;;
-    *) echo "usage: w87-close-report.sh cpu-idle|cpu-event|sched|rule-eval|bench|detect|pod-median|pod-peak|mem-slice|chain|prof|memsplit|ref-811|dlist" >&2; exit 2 ;;
+    *) echo "usage: w87-close-report.sh cpu-idle|cpu-event|sched|rule-eval|bench|detect|pod-median|pod-peak|pod-peak128|mem-slice|chain|prof|memsplit|ref-811|dlist" >&2; exit 2 ;;
 esac

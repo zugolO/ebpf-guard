@@ -4357,6 +4357,10 @@ echo "=== 5.9.8f. settle_reason: контроль счётности сообщ�
 record_covered "=== 5.9.8f. settle_reason"
 settle_reason_ceiling_count=0
 settle_reason_checked=0
+# Волна 9, заход A (решение владельца 18.10.2026, Е4(2)): режим null НЕ судится по settle_reason. У него нет
+# генератора и нет асинхронного хвоста — null И ЕСТЬ измерение фона, окно = все 30 срезов, причина
+# background_window; «ceiling» у null старой сборки был монеткой (4 из 12, w87-e4-settle-freq.sh), а не
+# сигналом. Критерий судит idle и run_ringbuf_overflow, где хвост есть.
 for settle_label in null idle; do
     settle_marker="$RESULTS_DIR/counting-control-${settle_label}-$TIMESTAMP.txt"
     if [ ! -f "$settle_marker" ] || grep -q '^skipped=1' "$settle_marker" 2>/dev/null; then
@@ -4367,8 +4371,12 @@ for settle_label in null idle; do
         echo "  $settle_label: маркер без settle_reason — сборка харнесса старее 5.9.8f"
         continue
     fi
-    settle_reason_checked=$((settle_reason_checked + 1))
     settle_val=$(awk -F= '$1=="settle_reason"{print $2}' "$settle_marker" 2>/dev/null)
+    if [ "$settle_label" = "null" ]; then
+        echo "  null: settle_reason=${settle_val:-?} — окно фона, не судится (решение 18.10, Е4(2)); судят idle и run_ringbuf_overflow"
+        continue
+    fi
+    settle_reason_checked=$((settle_reason_checked + 1))
     echo "  $settle_label: settle_reason=${settle_val:-?}"
     [ "$settle_val" = "ceiling" ] && settle_reason_ceiling_count=$((settle_reason_ceiling_count + 1))
 done

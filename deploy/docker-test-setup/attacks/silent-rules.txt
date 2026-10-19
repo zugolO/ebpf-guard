@@ -115,6 +115,17 @@ web_sql_injection_files b
 # UnreachableSyscallRules, что уже проверяет rules_coverage_test.go.
 # Снимается волной 6, если новый источник событий (расширенный
 # KernelFilter.MonitoredSyscalls) сделает nr достижимым.
+# Волна 9, заход A, В5 (19.10.2026): evasion_self_delete — строка, а не правка правила.
+# Условие — nr=87/263 (unlink/unlinkat) «не из списка», а оба номера вне ядерного allowlist
+# (DefaultMonitoredSyscalls); агент называет правило при старте как недостижимое по nr
+# (ebpf_guard_rule_unreachable{axis="nr"}, cmd/ebpf-guard/deadrules_test.go).
+# Номера отвергнуты каталогом цены волны 7 (wave7-nr-portions.txt, P4 REJECTED 87/263 и
+# P4 MUTERULE evasion_self_delete): открытие unlink(87) давало 44 алерта за окно = 264/ч, 89 из
+# 91 за прогон — grafana, при нуле детекта (№520). Правка условия («собственный бинарь» вместо
+# «любой unlink не из списка») — продуктовое решение вне В5; пока она не принята, правило немо
+# ПО КОНСТРУКЦИИ, категория a (недостижимый nr), как ransomware_backup_delete ниже. Строка
+# снимается тем днём, когда nr 87/263 войдут в allowlist вместе с суженным условием.
+evasion_self_delete a
 mitre_arp_spoof_raw_socket a
 mitre_sandbox_detect_cpuid a
 ransomware_backup_delete a

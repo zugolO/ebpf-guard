@@ -76,17 +76,23 @@ mksched() { # <имя> <число профилей> <findRunnable с> <проч
     for i in $(seq 1 "$k"); do mkpp "$D/snapshots/$(printf 'cpu-%04d.pprof' $((i * 12)))" 30 "runtime.mstart>runtime.schedule>runtime.findRunnable:$fr" "main>correlator.EvaluateInto:$ot"; done
     echo "$D"
 }
-w 8.7.3-good '^ДОСТИГНУТО: 8\.7\.3 .*runtime\.findRunnable cum 12\.5[0-9]*% ≤ 15%' "$(IDLE=$(mksched s1 8 1 7) em sched)"                # 1 / 8 = 12,5%
-w 8.7.3-over '^ПРОВАЛЕН: 8\.7\.3 .*доля планировщика 2[0-9.]+% > 15%' "$(IDLE=$(mksched s2 8 2 7) em sched)"                          # 2 / 9 = 22%
-w 8.7.3-edge-night-86 '^ПРОВАЛЕН: 8\.7\.3 ' "$(IDLE=$(mksched s3 8 29 71) em sched)"                                                   # ночь 8.6: 29%
-# заход Е3: секунды и отношение к базе того же прибора печатаются рядом с долей; вердикт по доле не меняется
-o=$(IDLE=$(mksched s6 8 2 7) BASE_IDLE=$(mksched s7 8 3 7) em sched)                                                                   # ночь 2/9 = 22%, база 3/10 = 30%
-w 8.7.3-abs-ratio 'СПРАВОЧНО \(Е3\): runtime\.findRunnable на 270 с: ночь [0-9.]+ с \(доля 22\.[0-9]+%\), база того же прибора [0-9.]+ с \(доля 30\.[0-9]+%\); секунды к базе 0\.67, доля к базе 0\.7[0-9]' "$o"
-w 8.7.3-abs-verdict-unchanged '^ПРОВАЛЕН: 8\.7\.3 .*доля планировщика 2[0-9.]+% > 15%' "$o"
-w 8.7.3-abs-no-base 'СПРАВОЧНО \(Е3\): .* с на 270 с \(доля [0-9.]+%\); базы того же прибора не задано' "$(IDLE=$(mksched s8 8 2 7) em sched)"
-w 8.7.3-abs-thin-base 'база .* меньше 6 idle-профилей или нет узла, отношение НЕ СЧИТАЕТСЯ' "$(IDLE=$(mksched s9 8 2 7) BASE_IDLE=$(mksched s10 3 3 7) em sched)"
-w 8.7.3-few '^НЕИЗМЕРИМ: 8\.7\.3 .*профилей 3 < 6' "$(IDLE=$(mksched s4 3 1 7) em sched)"
-w 8.7.3-no-node '^НЕИЗМЕРИМ: 8\.7\.3 .*нет итога|нет узла runtime.findRunnable' "$(d=$T/s5/idle; mkdir -p $d/snapshots; for i in 1 2 3 4 5 6 7; do mkpp "$d/snapshots/cpu-000$i.pprof" 30 "main>x:3"; done; IDLE=$d em sched)"
+# Волна 9, В2: 8.7.3 судится секундами findRunnable cum на 270 с ≤ 1,14 (0,8 × 1,43); доля — справка.
+# Профили по 30 с: findRunnable fr с на профиль → 9 × fr с на 270 с (порог 1,14 ↔ fr ≈ 0,1267).
+BASE143=$(mksched sb 8 0.16 7)                                                                                                         # база ночи 8.6: 1,44 с на 270 с (объявлено 1,43)
+w 8.7.3-good '^ДОСТИГНУТО: 8\.7\.3 .*runtime\.findRunnable cum 0\.90 с на 270 с ≤ 1\.14 с = 0\.8 × 1\.43' "$(IDLE=$(mksched s1 8 0.1 7) BASE_IDLE=$BASE143 em sched)"
+w 8.7.3-edge-in '^ДОСТИГНУТО: 8\.7\.3 .*cum 1\.08 с на 270 с' "$(IDLE=$(mksched s2 8 0.12 7) BASE_IDLE=$BASE143 em sched)"                 # 1,08 ≤ 1,14
+w 8.7.3-edge-out '^ПРОВАЛЕН: 8\.7\.3 .*cum 1\.17 с на 270 с > 1\.14 с' "$(IDLE=$(mksched s3 8 0.13 7) BASE_IDLE=$BASE143 em sched)"       # 1,17 > 1,14
+w 8.7.3-night-86 '^ПРОВАЛЕН: 8\.7\.3 .*cum 1\.44 с на 270 с > 1\.14 с' "$(IDLE=$BASE143 BASE_IDLE=$BASE143 em sched)"                     # ночь 8.6 краснеет и здесь
+# главное: доля и секунды расходятся — судят секунды
+w 8.7.3-low-share-high-seconds '^ПРОВАЛЕН: 8\.7\.3 .*cum 4\.50 с на 270 с > 1\.14 с \(доля 1\.[0-9]+%\)' "$(IDLE=$(mksched s4 8 0.5 30) BASE_IDLE=$BASE143 em sched)"   # доля 1,6% ≤ 15% — прежний критерий пропустил бы
+w 8.7.3-high-share-low-seconds '^ДОСТИГНУТО: 8\.7\.3 .*cum 0\.90 с на 270 с .*доля 2[0-9]\.[0-9]+% — справка' "$(IDLE=$(mksched s5 8 0.1 0.3) BASE_IDLE=$BASE143 em sched)" # доля 25% > 15%, секунды 0,90 — форма ночи 8.7
+w 8.7.3-share-printed 'профилей 8, runtime\.findRunnable cum [0-9.]+ с за 240 с профилей = 0\.90 с на 270 с \(доля [0-9.]+% — справка\)' "$(IDLE=$(mksched s6 8 0.1 7) BASE_IDLE=$BASE143 em sched)"
+w 8.7.3-abs-ratio 'СПРАВОЧНО \(Е3\): runtime\.findRunnable на 270 с: ночь 0\.90 с .*секунды к базе 0\.62' "$(IDLE=$(mksched s7 8 0.1 7) BASE_IDLE=$BASE143 em sched)"
+w 8.7.3-no-base 'СПРАВОЧНО: базы того же прибора не задано \(BASE_IDLE\) — судит объявленная константа 1\.14 с' "$(IDLE=$(mksched s8 8 0.1 7) em sched)"
+w 8.7.3-wrong-base '^НЕИЗМЕРИМ: 8\.7\.3 .*база из архива 2\.70 с не сходится с объявленной 1\.43 с' "$(IDLE=$(mksched s9 8 0.1 7) BASE_IDLE=$(mksched s10 8 0.3 7) em sched)"
+w 8.7.3-thin-base '^НЕИЗМЕРИМ: 8\.7\.3 .*база .* меньше 6 idle-профилей или нет узла' "$(IDLE=$(mksched s11 8 0.1 7) BASE_IDLE=$(mksched s12 3 0.16 7) em sched)"
+w 8.7.3-few '^НЕИЗМЕРИМ: 8\.7\.3 .*профилей 3 < 6' "$(IDLE=$(mksched s13 3 0.1 7) em sched)"
+w 8.7.3-no-node '^НЕИЗМЕРИМ: 8\.7\.3 .*нет узла runtime\.findRunnable' "$(d=$T/s14/idle; mkdir -p $d/snapshots; for i in 1 2 3 4 5 6 7; do mkpp "$d/snapshots/cpu-000$i.pprof" 30 "main>x:3"; done; IDLE=$d em sched)"
 
 # ── 8.7.6: профили под пакетом ──────────────────────────────────────────────────
 mkcpu_dir() { # <каталог> <число файлов> <CPU с в файле>
@@ -313,6 +319,25 @@ w 8.7.Д-no-table '^НЕИЗМЕРИМ: 8\.7\.Д .*нет таблицы ста�
 w 8.7.Д-real-plan-parses '^(ДОСТИГНУТО|ПРОВАЛЕН): 8\.7\.Д ' "$(PLAN=$HERE/../../plan.md REPORTS=$REP em dlist)"
 
 
+# ── 9.2 (волна 9, В1/Д15): цель 128 МиБ при Rego off ───────────────────────────
+rego_pod() { # <имя> <пик МиБ> <rego_active|none>
+    local p; p=$(mkpod "$1" peak="$2"); local att=${p#*:}
+    [ "$3" != none ] && echo "ebpf_guard_runtime_flag{flag=\"rego_active\"} $3" >> "$att/m-att1.txt"
+    echo "$p"
+}
+rpods() { local r="" i=0 v act=${RA:-0}; for v in "$@"; do i=$((i + 1)); r="$r $(rego_pod "rg$RANDOM$i" "$v" "$act")"; done; echo "${r# }"; }
+p128() { POD_RUNS="$1" em pod-peak128; }
+w 9.2-good '^ДОСТИГНУТО: 9\.2 .*медиана пиков пода 12[0-9.]* МиБ ≤ 128 МиБ по 5 прогонам core' "$(p128 "$(rpods 120 122 124 126 127)")"
+w 9.2-over '^ПРОВАЛЕН: 9\.2 .*медиана пиков 13[0-9.]* МиБ > 128' "$(p128 "$(rpods 130 131 132 133 134)")"
+w 9.2-median-not-max '^ДОСТИГНУТО: 9\.2 ' "$(p128 "$(rpods 120 121 122 123 150)")"                        # выброс не краснит: судит медиана
+w 9.2-edge-in '^ДОСТИГНУТО: 9\.2 ' "$(p128 "$(rpods 127.5 127.5 127.5 127.5 127.5)")"
+w 9.2-edge-out '^ПРОВАЛЕН: 9\.2 ' "$(p128 "$(rpods 128.5 128.5 128.5 128.5 128.5)")"
+w 9.2-rego-on-not-counted '^НЕИЗМЕРИМ: 9\.2 .*Rego ВКЛЮЧЁН \(rego_active=1\).*цель 128 судится на core' "$(RA=1 p128 "$(RA=1 rpods 100 100 100 100 100)")"   # 100 МиБ с Rego цель не доказывают
+w 9.2-mixed-four-core '^НЕИЗМЕРИМ: 9\.2 .*засчитанных прогонов core 4 < 5' "$(p128 "$(rpods 100 100 100 100) $(RA=1 rpods 100)")"
+w 9.2-no-flag-series '^НЕИЗМЕРИМ: 9\.2 .*нет серии runtime_flag.*до волны 9' "$(RA=none p128 "$(RA=none rpods 100 100 100 100 100)")"
+w 9.2-four-runs '^НЕИЗМЕРИМ: 9\.2 .*засчитанных прогонов core 4 < 5' "$(p128 "$(rpods 100 100 100 100)")"
+w 9.2-over-with-rego-not-fail '^НЕИЗМЕРИМ: 9\.2 ' "$(RA=1 p128 "$(RA=1 rpods 150 150 150 150 150)")"                # 150 с Rego — не провал цели core
+
 # ── мутации ───────────────────────────────────────────────────────────────────
 if [ "${1:-}" = --mutate ]; then
     mut() { # <имя> <sed-выражение>
@@ -332,7 +357,14 @@ if [ "${1:-}" = --mutate ]; then
     mut event-min-runs   's/POD_MIN_RUNS=${POD_MIN_RUNS:-5}/POD_MIN_RUNS=${POD_MIN_RUNS:-1}/'
     mut event-split-off  's/^        cpu_split$/        :/'
     mut split-unlabelled 's/tot - l, 100 \* (tot - l) \/ tot/0, 0/'
-    mut sched-max        's/SCHED_MAX=${SCHED_MAX:-15}/SCHED_MAX=${SCHED_MAX:-99}/'
+    mut peak128-limit    's/POD_PEAK_MAX=${POD_PEAK_MAX:-128}/POD_PEAK_MAX=${POD_PEAK_MAX:-999}/'
+    mut peak128-rego-on  's/if awk -v v="\$rf" .BEGIN { exit !(v != 0) }.; then cls=/if false; then cls=/'
+    mut peak128-no-flag  's/if \[ -z "\$rf" \]; then cls="\$cls; прогон \$k: нет серии/if false; then cls="$cls; прогон $k: нет серии/'
+    mut peak128-median   '/^pod_peak128() {/,/^}/ s/med=\$(printf .%s. "\$peaks" | _median)/med=$(printf "%s" "$peaks" | sort -n | tail -1)/'
+    mut sched-sec-max    's/SEC_MAX=${SEC_MAX:-1.14}/SEC_MAX=${SEC_MAX:-99}/'
+    mut sched-by-share   's/awk -v v="\$cn_s" -v l="\$SEC_MAX" .BEGIN { exit !(v <= l + 1e-9) }. || fail=/awk -v v="$cp" -v l="$SCHED_MAX" "BEGIN { exit !(v <= l) }" || fail=/'
+    mut sched-base-check 's/BASE_SEC_EXPECT=${BASE_SEC_EXPECT:-1.43}/BASE_SEC_EXPECT=${BASE_SEC_EXPECT:-0}/'
+    mut sched-norm       's/printf "%.2f", c \* n \/ d }.)$/printf "%.2f", c }")/'
     mut sched-fn         's/SCHED_FN=${SCHED_FN:-runtime.findRunnable}/SCHED_FN=${SCHED_FN:-runtime.nothing}/'
     mut sched-abs-ratio  's/cs \/ bs, cp \/ bp/bs \/ cs, bp \/ cp/'
     mut sched-min-profs  's/PROF_MIN=${PROF_MIN:-6}/PROF_MIN=${PROF_MIN:-0}/'

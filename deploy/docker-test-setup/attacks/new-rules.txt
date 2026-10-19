@@ -373,3 +373,16 @@ sigma_kernel_version_read	20261014	8.6-Д16/№562: исключение qemu-ga
 web_path_traversal_process	20261015	8.6-B/1: процесс — веб-воркер (proc.comm) И путь — обход; имя сервера в пути больше не считается
 container_escape_cgroup_v1_release_agent	20261015	8.6-B/1: изменение (write или open с режимом записи) файла release_agent, любая точка монтирования; чтение не считается
 privesc_cgroup_notify_on_release	20261015	8.6-B/1: то же для notify_on_release/release_agent; действие block не тронуто
+# Волна 9, заход A, В5 (19.10.2026): сужение УСЛОВИЯ (id те же) — исключения по ЮНИТУ man-db.service
+# (proc.systemd_unit), запрет 5.9.9.F.3 на idle-actors.txt не снят. Дети юнита в ночь 8.7 (08:30:58):
+# предэкзековые (mandb)/(find)/(install) и install. Вход пакета атак (не man-db) исключения не задевает;
+# на архивах старше правки эти правила на (mandb)/(find)/(install) срабатывали по прежнему условию.
+# drift_dangerous_syscall (то же сужение, исключение man-db-unit-child) сюда НЕ записан намеренно: реплей 21/25
+# (replay-gate.sh, collect-6.0b) читает его строку «не потеряно» по позиции и требует отсутствия записи в new-rules —
+# дата 20261019 убрала бы правило из «потеряно» строкой «моложе архива» и обнулила бы проверку дрейфового реестра.
+sigma_seccomp_filter_install	20261019	9-A/В5: исключение man-db-unit-child (seccomp от предэкзековых детей man-db.service)
+sensitive_file_read	20261019	9-A/В5: исключение man-db-unit-child (чтение /etc/passwd детьми man-db.service, O_RDONLY/open/read)
+drift_exec_from_system_bin	20261019	9-A/В5: исключение man-db-unit-exec (find/install/mandb из man-db.service)
+anomaly_detection	20261019	9-A/В5: исключение man-db-unit-child (любая аномалия внутри cgroup man-db.service, ось — юнит; вопрос владельцу)
+# Волна 9, заход A, В1/Д15 (19.10.2026): правила не заводились, а ушли из поставки (rules/optional) — вынесены 34 cloud_audit,
+# 9 gpu, 3 iouring; реплеи старых архивов их не видят и раньше (источника событий не было, №565), записей не требуется.

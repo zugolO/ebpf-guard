@@ -12,10 +12,16 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Two artifacts (wave 9, D15): **core** (default image/chart/`make docker`, built without the `rego` tag, `policy.rego.enabled: false`) and **full** (image tag `-full`, `make docker-full`, Helm `image.variant: full`; Rego is then switched on with `config.policy.rego.enabled: true` — the chart refuses to render the core image with Rego on). Runtime flags `ebpf_guard_runtime_flag{flag="rego_built|rego_config|rego_active|sequence_profiler"}` say what actually runs; `ebpf_guard_memory_pressure_sequence_profilers` says whether the memory-pressure watcher's level 1 has anything to shed
+- `rules/optional/`: 46 rules that have no event source in the shipped build (34 `cloud_audit`, 9 `gpu`, 3 `iouring`) moved out of the shipped rule set (they are not embedded, not checksummed, not in the image/chart/packages); copy them into `rules.path` together with their collector to use them
 - Overload behaviour (wave 8.8): proportional `bpf.overload_shed` controller sheds bulk file events in the kernel by queue pressure instead of letting the pipeline collapse past its ceiling; the file sampler (`bpf.sampling.file_rate` / CPU watcher / controller) now applies only to "hot" processes (`bpf.sampling.hot_pid_threshold`, default 300 events per 100 ms) and never to mutations (chmod/unlink/rename/truncate/rmdir). `/health` reports `degraded` while shedding. New metrics `ebpf_guard_overload_shed_{divisor,active,steps_total}`, `ebpf_guard_file_hot_shed_total`, `ebpf_guard_events_dropped_fraction_10s`, `ebpf_guard_cpu_watchdog_base_cores`, `ebpf_guard_ingest_worker_bulk_dropped_total`
 - Load-probe counters `ebpf_guard_load_probe_events_total` / `ebpf_guard_load_probe_event_age_seconds` for processes whose comm starts with `w88` (measurement harness only)
 
 ### Changed
+- `policy.rego.enabled` defaults to `false` and `profiler.sequence.enabled` defaults to `false` in every hardware profile (wave 9, D15/D4b); both remain opt-in
+- LSM audit trail (`bpf/lsm.bpf.c`) records denials only: `lsm/task_kill` (always allows) no longer writes a ring-buffer record per signal, only the counter `ebpf_guard_lsm_blocks_total{hook="task_kill",action="allow"}` (wave 9, D17; needs `make generate`)
+- `web_path_traversal_process` is merged into `owasp_path_traversal` (wave 9, D18): the merged rule keeps the union of web-worker comm families and encoding forms
+- `drift_dangerous_syscall`, `sigma_seccomp_filter_install`, `sensitive_file_read`, `drift_exec_from_system_bin` and `anomaly_detection` get a `man-db-unit-child` exception keyed on the kernel-assigned systemd unit (`proc.systemd_unit = man-db.service`) instead of comm
 - Degraded visibility is now judged by loss RATE over a 10 s window (bulk: >= 1% and >= 10 events; protected: any drop) instead of "any drop in the last 5 s"
 - CPU pressure watcher scales its thresholds by the cgroup CPU quota (`cpu.max` / `cfs_quota_us`) when one is set, not by the host core count; level 2 no longer cuts syscall/network sampling unless `shed_protected` is set
 - A bulk event for a ingest worker whose channel is full is dropped (and counted as `ingest/worker_full`) when its pid dominates that worker, instead of stalling the single bulk dispatcher for every other pid

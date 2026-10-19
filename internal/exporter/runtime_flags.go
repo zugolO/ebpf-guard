@@ -12,7 +12,8 @@ import (
 var (
 	// RuntimeFlag — булевы флаги измерительных режимов и вкладов в цену.
 	// flag ∈ event_dump, pprof_event_labels, pprof_rule_labels, pprof_stage_labels, enable_pprof,
-	// arg_predicates_config.
+	// arg_predicates_config, rego_built (binary carries the rego tag), rego_config (policy.rego.enabled), rego_active
+	// (both — the Rego layer evaluates policies), sequence_profiler (SequenceProfiler runs; wave 9, D15/D4b).
 	RuntimeFlag = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ebpf_guard_runtime_flag",

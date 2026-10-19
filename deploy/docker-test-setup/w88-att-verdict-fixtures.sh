@@ -27,6 +27,14 @@ v() { ATT_TIMER_REG="$T/reg.txt" bash "$SCRIPT" pod1c "$1" "$T/base" 2>&1; }
 has() { grep -aqE "$2" <<< "$1"; }
 
 mk "$T/same" "$BASE_IDS"; o=$(v "$T/same"); has "$o" '8\.8\.6 pod1c: PASS' && ok "тот же состав: PASS" || { bad "тот же состав"; echo "$o"; }
+# Волна 9 (Д15, Rego выключен в core): таймер ноды лежит под БАЗОВЫМИ именами двойников — реестр боевого файла их знает
+BASE_NR="r_a r_b r_c r_d r_e r_f r_g r_h r_i r_j r_k r_l r_m r_n r_o r_p"
+mk "$T/base-nr" "$BASE_NR k8s_sa_token_read k8s_sa_token_projected_read"; mk "$T/under-nr" "$BASE_NR"
+o=$(bash "$SCRIPT" pod1c "$T/under-nr" "$T/base-nr" 2>&1)
+has "$o" '8\.8\.6 pod1c: PASS' && has "$o" 'не судится \(реестр фонового таймера.*k8s_sa_token_projected_read' && ok "Rego off: базовые двойники таймера не судятся, печатаются" || { bad "Rego off: базовые двойники таймера"; echo "$o"; }
+grep -vE '^k8s_sa_token_(projected_)?read$' "$HERE/attacks/att-composition-timer.txt" > "$T/reg-no-twins.txt"
+o=$(ATT_TIMER_REG="$T/reg-no-twins.txt" bash "$SCRIPT" pod1c "$T/under-nr" "$T/base-nr" 2>&1)
+has "$o" '8\.8\.6 pod1c: FAIL' && ok "без записей двойников тот же прогон красный (запись нужна)" || { bad "без записей двойников прогон не красный"; echo "$o"; }
 mk "$T/timer" "r_a r_b r_c r_d r_e r_f r_g r_h r_i r_j r_k r_l r_m r_n r_o r_p"; o=$(v "$T/timer")
 has "$o" '8\.8\.6 pod1c: PASS' && has "$o" 'не судится.*k8s_token_access' && ok "выпал только тип реестра: PASS, тип напечатан" || { bad "тип реестра"; echo "$o"; }
 mk "$T/real" "r_a r_b r_c r_d r_e r_f r_g r_h r_i r_j r_k r_l r_m r_n r_o k8s_token_access"; o=$(v "$T/real")

@@ -1760,6 +1760,32 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1562, sigma, seccomp, defense-evasion]
+    exceptions:
+      # Волна 9, заход A, В5 (решение владельца 18.10.2026: запрет 5.9.9.F.3 на реестр
+      # не снимается, правила сужаются). Ночь 8.7, 08:30:58 — старт man-db.service:
+      # предэкзековые дети юнита ((mandb), (find), (install); comm «(…)» — имя до
+      # execve, образ не разрешён) и их песочница (systemd: PrivateTmp/ProtectSystem →
+      # mount/unshare, SystemCallFilter → seccomp). Ось — ЮНИТ по cgroup_id, который
+      # ядро записало в событие (proc.systemd_unit, cgroup_unit.go): его заводит
+      # systemd PID 1, процесс comm-ом в него не попадёт; контейнер, user.slice и чужой
+      # юнит дают пустое/другое значение. Образец — apt-gpgv-tmp-unit (rules/defense-evasion.yaml).
+      # Условие на юнит стоит ПОСЛЕДНИМ в группе and (дорогое разрешение, как exe_path).
+      - name: man-db-unit-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.comm
+              op: in
+              values: ["(mandb)", "(find)", "(install)"]
+            - field: proc.systemd_unit
+              op: eq
+              values: [man-db.service]
 
   # Wave 6.2.1, №220 (second pass, evidence from the 6.2 archive): flannel's
   # invocations that tripped this rule 60/window are NOT flushes at all —

@@ -85,6 +85,32 @@ rules:
             - field: proc.exe_path
               op: in
               values: [/usr/bin/mandb]
+      # Волна 9, заход A, В5 (решение владельца 18.10.2026: запрет 5.9.9.F.3 на реестр
+      # не снимается, правила сужаются). Ночь 8.7, 08:30:58 — старт man-db.service:
+      # предэкзековые дети юнита ((mandb), (find), (install); comm «(…)» — имя до
+      # execve, образ не разрешён) и их песочница (systemd: PrivateTmp/ProtectSystem →
+      # mount/unshare, SystemCallFilter → seccomp). Ось — ЮНИТ по cgroup_id, который
+      # ядро записало в событие (proc.systemd_unit, cgroup_unit.go): его заводит
+      # systemd PID 1, процесс comm-ом в него не попадёт; контейнер, user.slice и чужой
+      # юнит дают пустое/другое значение. Образец — apt-gpgv-tmp-unit (rules/defense-evasion.yaml).
+      # Условие на юнит стоит ПОСЛЕДНИМ в группе and (дорогое разрешение, как exe_path).
+      # Событие — execve find/install из скриптов man-db.service (после exec comm уже без скобок).
+      - name: man-db-unit-exec
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.comm
+              op: in
+              values: ["find", "install", "mandb"]
+            - field: proc.systemd_unit
+              op: eq
+              values: [man-db.service]
 
   # ── New library loaded drift ──────────────────────────────────────────────
   - id: drift_new_library_in_system_dir
@@ -374,6 +400,37 @@ rules:
       - "drift"
       - "container-escape"
       - "privilege-escalation"
+    exceptions:
+      # Волна 9, заход A, В5 (решение владельца 18.10.2026: запрет 5.9.9.F.3 на реестр
+      # не снимается, правила сужаются). Ночь 8.7, 08:30:58 — старт man-db.service:
+      # предэкзековые дети юнита ((mandb), (find), (install); comm «(…)» — имя до
+      # execve, образ не разрешён) и их песочница (systemd: PrivateTmp/ProtectSystem →
+      # mount/unshare, SystemCallFilter → seccomp). Ось — ЮНИТ по cgroup_id, который
+      # ядро записало в событие (proc.systemd_unit, cgroup_unit.go): его заводит
+      # systemd PID 1, процесс comm-ом в него не попадёт; контейнер, user.slice и чужой
+      # юнит дают пустое/другое значение. Образец — apt-gpgv-tmp-unit (rules/defense-evasion.yaml).
+      # Условие на юнит стоит ПОСЛЕДНИМ в группе and (дорогое разрешение, как exe_path).
+      # Только песочница: mount/umount2/unshare. ptrace/setns/bpf/perf_event_open из
+      # того же юнита продолжают срабатывать.
+      - name: man-db-unit-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: nr
+              op: in
+              values: ["mount", "umount2", "unshare"]
+            - field: proc.comm
+              op: in
+              values: ["(mandb)", "(find)", "(install)"]
+            - field: proc.systemd_unit
+              op: eq
+              values: [man-db.service]
 
   # ── pivot_root: occurrence, not novelty ───────────────────────────────────
   #

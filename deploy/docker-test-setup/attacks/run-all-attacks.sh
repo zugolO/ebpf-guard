@@ -523,7 +523,13 @@ counting_settle_loop() {
                 ref=$(awk -v a="$d1" -v b="$d2" -v c="$d3" 'BEGIN{printf "%.4f", (a+b+c)/3}')
                 spread=$(awk -v a="$d1" -v b="$d2" -v c="$d3" 'BEGIN{mx=a; if(b>mx)mx=b; if(c>mx)mx=c; mn=a; if(b<mn)mn=b; if(c<mn)mn=c; printf "%.4f", mx-mn}')
                 jitter=$(awk -v r="$ref" 'BEGIN{j=r*0.10; if(j<5) j=5; printf "%.4f", j}')
-                if awk -v s="$spread" -v j="$jitter" 'BEGIN{exit !(s<=j)}'; then
+                # Волна 9, заход A (решение владельца 18.10.2026, Е4(2)): у mode=null нет внешнего
+                # фона и нет асинхронного хвоста, который луп призван дождаться, — null И ЕСТЬ
+                # измерение фона. «Устоялся» для него — разброс трёх последних темпов <= 10% при
+                # волнистом фоне стенда (229…3826 соб./с, всплеск раз в минуту): сходился 8 раз из 12
+                # (w87-e4-settle-freq.sh), то есть FAIL 5.9.8f на null был монеткой. Поэтому null не
+                # выходит раньше: окно = все max_iters срезов, причина — background_window.
+                if [ "$mode" != "null" ] && awk -v s="$spread" -v j="$jitter" 'BEGIN{exit !(s<=j)}'; then
                     SETTLE_REASON="flattened"
                     SETTLE_I="$i"
                     return
@@ -542,6 +548,10 @@ counting_settle_loop() {
         sleep 1
     done
     SETTLE_I="$i"
+    # mode=null: потолок — штатный конец окна фона, а не «не устоялось» (см. выше). timeout остаётся timeout.
+    if [ "$mode" = "null" ] && [ "$SETTLE_REASON" = "ceiling" ]; then
+        SETTLE_REASON="background_window"
+    fi
 }
 
 # 5.9.6c (P0, "ни один вызов не теряется"): positive control on counting.

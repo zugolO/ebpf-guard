@@ -64,10 +64,12 @@ has() { grep -aqE "$2" <<< "$1"; }
 
 # 1. ноль потерь на 2× — PASS
 o=$(run clean "$S0,$S1,$(two 50000 0.4 0)"); has "$o" '^8\.8\.4 host: PASS' && ok "ноль потерь на 2×: 8.8.4 PASS" || { bad "ноль потерь на 2×"; echo "$o"; }
-# 2. одно потерянное событие — FAIL по порогу плана (0), прежний порог 0,5% справочно PASS
-o=$(run lose1 "$S0,$S1,$(two 50000 0.4 1)"); has "$o" '^8\.8\.4 host: FAIL.*справочно по прежнему порогу 0\.5%: PASS' && ok "1 событие: FAIL по плану, 0,5% справочно PASS" || { bad "1 событие"; echo "$o"; }
+# 2. одно потерянное событие (0,01%) — PASS по порогу 0,1% (волна 9); «0 событий» справочно FAIL
+o=$(run lose1 "$S0,$S1,$(two 50000 0.4 1)"); has "$o" '^8\.8\.4 host: PASS.*порог «0 событий» — FAIL.*прежний 0\.5% — PASS' && ok "1 событие: PASS по 0,1%, «0 событий» справочно FAIL" || { bad "1 событие"; echo "$o"; }
+# 2б. 0,2% — FAIL по 0,1%, прежний 0,5% справочно PASS
+o=$(run mid "$S0,$S1,$(two 50000 0.4 24)"); has "$o" '^8\.8\.4 host: FAIL.*прежний 0\.5% — PASS' && ok "0,2%: FAIL по 0,1%, 0,5% справочно PASS" || { bad "0,2%"; echo "$o"; }
 # 3. 0,6% — FAIL и по прежнему порогу
-o=$(run big "$S0,$S1,$(two 50000 0.4 72)"); has "$o" '^8\.8\.4 host: FAIL.*справочно по прежнему порогу 0\.5%: FAIL' && ok "0,6%: FAIL, справочно FAIL" || { bad "0,6%"; echo "$o"; }
+o=$(run big "$S0,$S1,$(two 50000 0.4 72)"); has "$o" '^8\.8\.4 host: FAIL.*прежний 0\.5% — FAIL' && ok "0,6%: FAIL, справочно FAIL" || { bad "0,6%"; echo "$o"; }
 # 4. потери на 2.5× при чистых 2× — окно 2×, не 2,5×: PASS
 S25='{"name":"25000","ops":25000,"proc":10000,"drops":80000,"idle":0.35,"lost":200}'
 o=$(run window "$S0,$S1,$(two 50000 0.4 0),$S25"); has "$o" '^8\.8\.4 host: PASS' && ok "потери на 2,5× не судятся при чистых 2×" || { bad "окно 2×"; echo "$o"; }
@@ -111,7 +113,7 @@ if [ "$MODE" = "--mutate" ]; then
         n=$(REPORT="$T/mut.py" bash "$0" 2>&1 | grep -c '^FAIL')
         [ "$n" -ge "$3" ] && ok "мутация '$1' краснит $n фикстур" || bad "мутация '$1' краснит только $n (< $3)"
     }
-    mutate "порог 8.8.4 раздут" 's/^CTL_LOSS_MAX_EVENTS = 1.0/CTL_LOSS_MAX_EVENTS = 1e9/' 2
+    mutate "порог 8.8.4 раздут" 's/^CTL_LOSS_MAX_FRAC = 0.001/CTL_LOSS_MAX_FRAC = 1e9/' 2
     mutate "насыщение не судится" 's/^NODE_IDLE_MIN = 0.10/NODE_IDLE_MIN = 0.0/' 2
     mutate "окно 2× заменено на самую дальнюю" 's/ctl_step = min(cand)\[1\]/ctl_step = max(cand)[1]/' 1
     mutate "8.8.2 насыщение молчит" 's/elif sat_r and any/elif False and any/' 1

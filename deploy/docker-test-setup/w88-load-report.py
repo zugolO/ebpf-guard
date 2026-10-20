@@ -32,7 +32,9 @@ CLEAN_STEP_FRAC = 0.001     # «без потерь»: < 0,1% за 10 с
 PROBE_LOSS_MAX_EVENTS = 1.0  # 8.8.3: порог плана «потерь 0» (решение владельца 18.10 по рекомендации): нарушение = потеряно ≥ 1 события
 PROBE_LOSS_REF = 0.005      # 0,5% — прежний порог эмиттера, печатается справочно
 PROBE_WINDOW_MAX = 2.0      # 8.8.3: «bulk до 2× ёмкости» (план); было 2,5× без решения
-CTL_LOSS_MAX_EVENTS = 1.0   # 8.8.4: план — «потерь канарейки контрольных 0»; нарушение = потеряно ≥ 1 события
+CTL_LOSS_MAX_EVENTS = 1.0   # 8.8.4 до волны 9: «потерь канарейки контрольных 0»; нарушение = потеряно ≥ 1 события (справочно)
+CTL_LOSS_MAX_FRAC = 0.001   # 8.8.4, волна 9 (решение владельца 20.10): ≤ 0,1% у каждого контрольного; остаток виден по хопу
+                            # счётчиком ebpf_guard_events_dropped_by_pid_class_total{class="light"} (печатается рядом)
 CTL_LOSS_REF = 0.005        # 0,5% — прежний порог эмиттера (376a82e), печатается справочно
 CTL_WINDOW_NEAR = (1.5, 2.5)  # 8.8.4: ступень, ближайшая к 2× ёмкости, должна лежать в [1,5; 2,5]×ёмкости, иначе НЕИЗМЕРИМ
 NODE_IDLE_MIN = 0.10        # простой ноды < 10% (4 ядра заняты) — ступень на стенде не судится (НЕИЗМЕРИМ), а не FAIL
@@ -329,7 +331,7 @@ def main():
         if not r0:
             lines.append(verdict(label, role, None, "нет ни одной калибровочной ступени с зондом/контролями (PROBE=1 / CONTROLS=N)"))
             continue
-        bad, judged, worst, worst_ev, sat_skip = [], 0, 0.0, 0.0, []
+        bad, judged, worst, worst_ev, sat_skip, ev_bad = [], 0, 0.0, 0.0, [], []
         for i, s in enumerate(st):
             n = nums[i]
             if label == "8.8.3":
@@ -354,8 +356,10 @@ def main():
                 p99 = hist_q(n["a"], n["b"], name, 0.99) if kind == "probe" else None
                 if label == "8.8.3" and exp - seen >= PROBE_LOSS_MAX_EVENTS:
                     bad.append(f"{s['name']}/{name}: потеряно {exp - seen:.0f} соб. ({loss:.2%})")
+                if label == "8.8.4" and loss > CTL_LOSS_MAX_FRAC:
+                    bad.append(f"{s['name']}/{name}: потеряно {exp - seen:.0f} соб. ({loss:.2%} > {CTL_LOSS_MAX_FRAC:.1%})")
                 if label == "8.8.4" and exp - seen >= CTL_LOSS_MAX_EVENTS:
-                    bad.append(f"{s['name']}/{name}: потеряно {exp - seen:.0f} соб. ({loss:.2%})")
+                    ev_bad.append(f"{s['name']}/{name}: {exp - seen:.0f}")
                 if kind == "probe" and (p99 is None or p99 > PROBE_P99_MAX):
                     bad.append(f"{s['name']}/{name}: p99 возраста {'—' if p99 is None else f'{p99 * 1000:g} мс'} > {PROBE_P99_MAX * 1000:g}")
         if label == "8.8.3":
@@ -372,9 +376,18 @@ def main():
         if sat_skip:
             lines.append(verdict(label, role, None, f"{where}: ящик занят целиком, ступень не судится; {sat_skip[0]} (порог простоя {NODE_IDLE_MIN:.0%})"))
             continue
-        ref_note = f"справочно по прежнему порогу {CTL_LOSS_REF:.1%}: " + ("PASS" if worst <= CTL_LOSS_REF else "FAIL")
+        ref_note = (f"справочно: порог «0 событий» — " + ("PASS" if not ev_bad else f"FAIL ({', '.join(ev_bad)})") +
+                    f", прежний {CTL_LOSS_REF:.1%} — " + ("PASS" if worst <= CTL_LOSS_REF else "FAIL"))
+        n = nums[ctl_step]
+        light = {}
+        for hop in ("ringbuf_to_router", "router_to_queue", "worker_full"):
+            sel = lambda rows: sum(v for nm, l, v in rows if nm == "ebpf_guard_events_dropped_by_pid_class_total" and l.get("hop") == hop and l.get("class") == "light")
+            if any(nm == "ebpf_guard_events_dropped_by_pid_class_total" for nm, _, _ in n["c"]):
+                light[hop] = sel(n["c"]) - sel(n["a"])
+        hop_note = ("потери лёгких pid по хопам за ступень: " + ", ".join(f"{h} {v:.0f}" for h, v in light.items())) if light \
+            else "серии ebpf_guard_events_dropped_by_pid_class_total нет (бинарь до волны 9)"
         lines.append(verdict(label, role, (not bad) if judged else None,
-                             f"{where}; судимо {judged} контрольных; худшая потеря {worst:.2%} ({worst_ev:.1f} соб.), порог плана — 0 событий; {ref_note}" +
+                             f"{where}; судимо {judged} контрольных; худшая потеря {worst:.2%} ({worst_ev:.1f} соб.), порог {CTL_LOSS_MAX_FRAC:.1%}; {hop_note}; {ref_note}" +
                              (f"; нарушения: {'; '.join(bad)}" if bad else "")))
 
     # ── 8.8.5 ────────────────────────────────────────────────────────────────────────────────────────────────

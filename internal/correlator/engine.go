@@ -2025,7 +2025,7 @@ const (
 )
 
 // heavyTracker is a per-worker space-saving counter with a halving window. It is
-// written from the worker's bulk dispatcher (one per worker since the В8 shards); the mutex only
+// written from the bulk dispatcher (one goroutine; one per worker with EBPF_GUARD_BULK_SHARDS=1); the mutex only
 // keeps concurrent callers (tests, Ingest from several goroutines) race-free.
 type heavyTracker struct {
 	mu  sync.Mutex

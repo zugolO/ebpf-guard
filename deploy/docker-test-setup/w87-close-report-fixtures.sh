@@ -317,6 +317,11 @@ mkplan "$T/p-bad" $'Д3|что-то|?'
 w 8.7.Д-unknown-status '^НЕИЗМЕРИМ: 8\.7\.Д .*статус «что-то» не из перечня' "$(dl "$T/p-bad")"
 w 8.7.Д-no-table '^НЕИЗМЕРИМ: 8\.7\.Д .*нет таблицы статусов' "$(echo "# x" > "$T/p-none"; dl "$T/p-none")"
 w 8.7.Д-real-plan-parses '^(ДОСТИГНУТО|ПРОВАЛЕН): 8\.7\.Д ' "$(PLAN=$HERE/../../plan.md REPORTS=$REP em dlist)"
+# 9.Д (волна 9): своя таблица D9-STATUS рядом с таблицей 8.7 — эмиттер не смешивает их.
+{ cat "$T/p-open"; echo "<!-- D9-STATUS-BEGIN -->"; echo "| Д | статус | основание |"; echo "|---|---|---|"; echo "| Д1′ | ночь:8.1.1 | ночью |"; echo "| Д17 | закрыт | код |"; echo "<!-- D9-STATUS-END -->"; } > "$T/p-9"
+w 9.Д-own-table '^ДОСТИГНУТО: 9\.Д .*строк части Д 2: закрыто 2' "$(DTAG=D9-STATUS DLABEL=9.Д PLAN=$T/p-9 REPORTS=$REP em dlist)"
+w 9.Д-8.7-table-untouched '^ПРОВАЛЕН: 8\.7\.Д .*Д2 открыта' "$(dl "$T/p-9")"
+w 9.Д-real-plan-parses '^(ДОСТИГНУТО|ПРОВАЛЕН): 9\.Д ' "$(DTAG=D9-STATUS DLABEL=9.Д PLAN=$HERE/../../plan.md REPORTS=$REP em dlist)"
 
 
 # ── 9.2 (волна 9, В1/Д15): цель 128 МиБ при Rego off ───────────────────────────

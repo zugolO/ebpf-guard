@@ -1643,13 +1643,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// Wave 8.2, C1 (№539): the queues carry pooled *types.Event. Same depth, but a
 	// slot costs 8 bytes instead of sizeof(Event) until it is actually used.
 	highPriorityEventCh := make(chan *types.Event, eventQueueDepth)
-	// Волна 9, В8 (решение владельца 18.10): the bulk queue is split by pid into one
-	// shard per ingest worker, each with its own dispatcher (see the consumer loop).
-	// The single bulk dispatcher was the head of line of host×8: parked 10–35 s of 60
-	// on the one worker that held three of eight hot pids while the other workers idled.
-	// The shards share the depth of the former single queue, so the memory bound of
+	// Волна 9, В8 (решение владельца 18.10): the bulk queue can be split by pid into one
+	// shard per ingest worker, each with its own dispatcher (see the consumer loop). The
+	// shards share the depth of the former single queue, so the memory bound of
 	// capQueueDepthByMemLimit holds for their sum.
-	lowShards := makeBulkShards(engine.IngestWorkerCount(), eventQueueDepth)
+	//
+	// OFF by default (EBPF_GUARD_BULK_SHARDS=1 turns it on): measured 20.10 (n10, host×8,
+	// 60 000 ops/s) it bought nothing — the workers handled 2,97 M events against 2,95 M
+	// with one dispatcher, the bound is worker CPU, not the dispatcher (the head of line of
+	// заход B was already removed by the heavy-pid drop) — and 8.8.2 ×8 was 0,84 / 0,94
+	// against 0,95 / 0,99. Worse, with a dispatcher per worker the 1 000 ops/s probe on a
+	// worker with a single generator pid reached 1/8 of that worker's window, was taken
+	// for heavy and lost 2,3…6,4% of its events at worker_full (n9: 0).
+	bulkShardWorkers := 1
+	if os.Getenv("EBPF_GUARD_BULK_SHARDS") == "1" {
+		bulkShardWorkers = engine.IngestWorkerCount()
+	}
+	lowShards := makeBulkShards(bulkShardWorkers, eventQueueDepth)
 	lowShardsSend := make([]chan<- *types.Event, len(lowShards))
 	for i, c := range lowShards {
 		lowShardsSend[i] = c

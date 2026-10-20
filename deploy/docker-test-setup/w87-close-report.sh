@@ -706,11 +706,13 @@ memsplit() {
 
 # ── 8.7.Д: статус части Д из plan.md ───────────────────────────────────────────
 PLAN=${PLAN:-}; REPORTS=${REPORTS:-}; DEFER_ALLOWED=${DEFER_ALLOWED:-"Д4b Д15 Д17 Д18"}
+# Волна 9: тот же эмиттер судит 9.Д по своей таблице (DTAG=D9-STATUS DLABEL=9.Д).
+DTAG=${DTAG:-D-STATUS}; DLABEL=${DLABEL:-8.7.Д}
 dlist() {
-    echo "== w87 8.7.Д: PLAN=${PLAN:-—} REPORTS=${REPORTS:-—} отложить можно только: $DEFER_ALLOWED"
-    [ -s "$PLAN" ] || { verdict 8.7.Д "" "; нет plan.md (${PLAN:-—})" ""; return; }
-    local blk; blk=$(awk '/<!-- D-STATUS-BEGIN -->/ { p = 1; next } /<!-- D-STATUS-END -->/ { p = 0 } p' "$PLAN" | grep -a '^| Д')
-    [ -n "$blk" ] || { verdict 8.7.Д "" "; в plan.md нет таблицы статусов D-STATUS" ""; return; }
+    echo "== w87 $DLABEL: PLAN=${PLAN:-—} REPORTS=${REPORTS:-—} таблица $DTAG, отложить можно только: $DEFER_ALLOWED"
+    [ -s "$PLAN" ] || { verdict "$DLABEL" "" "; нет plan.md (${PLAN:-—})" ""; return; }
+    local blk; blk=$(awk -v b="<!-- $DTAG-BEGIN -->" -v e="<!-- $DTAG-END -->" 'index($0, b) { p = 1; next } index($0, e) { p = 0 } p' "$PLAN" | grep -a '^| Д')
+    [ -n "$blk" ] || { verdict "$DLABEL" "" "; в plan.md нет таблицы статусов $DTAG" ""; return; }
     local fail="" cls="" row id st why n=0 closed=0 deferred=0 lbl lv
     while IFS='|' read -r _ id st why _; do
         id=$(echo "$id" | xargs); st=$(echo "$st" | xargs); why=$(echo "$why" | xargs)
@@ -736,7 +738,7 @@ dlist() {
         esac
     done <<< "$blk"
     [ "$n" -gt 0 ] || cls="$cls; таблица статусов пуста"
-    verdict 8.7.Д "$fail" "$cls" "строк части Д $n: закрыто $closed, отложено решением владельца $deferred (${DEFER_ALLOWED}), открытых 0"
+    verdict "$DLABEL" "$fail" "$cls" "строк части Д $n: закрыто $closed, отложено решением владельца $deferred (${DEFER_ALLOWED}), открытых 0"
 }
 
 case "$MODE" in

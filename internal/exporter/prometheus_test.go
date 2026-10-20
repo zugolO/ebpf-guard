@@ -16,6 +16,7 @@ import (
 func TestRecordEvent(t *testing.T) {
 	// Reset metrics before test
 	EventsTotal.Reset()
+	resetHostEventCache()
 
 	// Record some events
 	RecordEvent("syscall")
@@ -285,6 +286,7 @@ func TestMetricDocumentation(t *testing.T) {
 	// We can't easily access the name from the metric itself, but we can verify
 	// the metrics work by recording values
 	EventsTotal.Reset()
+	resetHostEventCache()
 	EventsDropped.Reset()
 	AlertsTotal.Reset()
 	ProfilerAnomalyScore.Reset()

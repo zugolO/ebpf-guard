@@ -709,6 +709,7 @@ func (c *FileaccessCollector) sendFileEvent(ctx context.Context, out chan<- type
 	default:
 	}
 	if c.heavy.isHeavy(e.PID) {
+		exporter.RecordDropPidClass("ringbuf_to_router", true)
 		dropped()
 		return
 	}
@@ -718,6 +719,7 @@ func (c *FileaccessCollector) sendFileEvent(ctx context.Context, out chan<- type
 	case out <- e:
 	case <-ctx.Done():
 	case <-timer.C:
+		exporter.RecordDropPidClass("ringbuf_to_router", false)
 		dropped()
 	}
 }

@@ -334,11 +334,12 @@ var incidentIngestTotal = promauto.NewCounterVec(
 	[]string{"outcome"},
 )
 
-func init() {
-	for _, outcome := range []string{incidentIngestAccepted, incidentIngestGated} {
-		incidentIngestTotal.WithLabelValues(outcome)
-	}
-}
+// Resolved once: the ingest path adds to them on every event (волна 9, В4 — the label
+// lookup per event was a share of CounterVec.WithLabelValues, 4% CPU under load).
+var (
+	incidentIngestAcceptedTotal = incidentIngestTotal.WithLabelValues(incidentIngestAccepted)
+	incidentIngestGatedTotal    = incidentIngestTotal.WithLabelValues(incidentIngestGated)
+)
 
 // IncidentScoringConfig tunes how incidents are scored and when they are
 // promoted to an "attack" verdict. Weights are per-unit contributions; the

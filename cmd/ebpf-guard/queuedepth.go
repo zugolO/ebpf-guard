@@ -1,6 +1,10 @@
 package main
 
-import "math"
+import (
+	"math"
+
+	"github.com/zugolO/ebpf-guard/pkg/types"
+)
 
 // Волна 8.8, обвал за потолком (8.8.2 под 1 ядро = 0,41).
 //
@@ -51,4 +55,40 @@ func capQueueDepthByMemLimit(depth int, memLimit int64) (int, bool) {
 		return depth, false
 	}
 	return capDepth, true
+}
+
+// makeBulkShards splits the bulk queue into one shard per ingest worker (волна 9, В8).
+// workers is a power of two (the engine masks pids with workers-1); 0 workers —
+// synchronous engine — gives one shard. The shards share depth, so the memory bound
+// above holds for their sum.
+func makeBulkShards(workers, depth int) []chan *types.Event {
+	n := workers
+	if n < 1 {
+		n = 1
+	}
+	per := depth / n
+	if per < 1 {
+		per = 1
+	}
+	shards := make([]chan *types.Event, n)
+	for i := range shards {
+		shards[i] = make(chan *types.Event, per)
+	}
+	return shards
+}
+
+func bulkShardsLen(shards []chan *types.Event) int {
+	n := 0
+	for _, c := range shards {
+		n += len(c)
+	}
+	return n
+}
+
+func bulkShardsCap(shards []chan *types.Event) int {
+	n := 0
+	for _, c := range shards {
+		n += cap(c)
+	}
+	return n
 }

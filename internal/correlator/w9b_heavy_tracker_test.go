@@ -109,3 +109,33 @@ func TestW9B_WorkerTakesBulkUnderProtectedFlood(t *testing.T) {
 	wg.Wait()
 	assert.True(t, got, "bulk-событие не обработано за 2 с под потоком protected")
 }
+
+// TestW9B_BulkDropClass: the congestion drop names the class of the pid — the hot pid's
+// surplus is "heavy", a light pid's event that timed out waiting is "light" (8.8.4 by hop).
+func TestW9B_BulkDropClass(t *testing.T) {
+	w := &workerState{ch: make(chan *workerTask, 2), chHi: make(chan *workerTask, 2)}
+	ce := &CorrelationEngine{ingestPool: []*workerState{w}, ingestMask: 0}
+	ce.SetBulkDropOnCongestion(true, nil)
+	var heavy, light int
+	ce.SetBulkDropClassFn(func(h bool) {
+		if h {
+			heavy++
+		} else {
+			light++
+		}
+	})
+	fe := &types.FileEvent{Op: 1}
+	ctx := context.Background()
+	// Warm-up: until pid 4 holds 1/8 of the window it is not heavy yet and waits like anyone.
+	for i := 0; i < 300; i++ {
+		ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 4, File: fe}, false)
+	}
+	heavy, light = 0, 0
+	for i := 0; i < 100; i++ {
+		ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 4, File: fe}, false)
+	}
+	ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 9, File: fe}, false)
+	if heavy != 100 || light != 1 {
+		t.Fatalf("heavy=%d light=%d, want 100 and 1", heavy, light)
+	}
+}

@@ -259,6 +259,7 @@ type CorrelationEngine struct {
 	// bulkDropOnCongestion / bulkDropFn: see IngestAsyncPriority (волна 8.8, Р5).
 	bulkDropOnCongestion bool
 	bulkDropFn           func(pid uint32)
+	bulkDropClassFn      func(heavy bool) // волна 9: drop by pid class (8.8.4 residual by hop)
 	ingestMask uint32
 	// closeIngestOnce guards closing the ingest worker channels so both
 	// DrainIngestPool (called during graceful shutdown, before the final
@@ -1965,7 +1966,7 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 				default:
 				}
 			}
-			ce.dropBulk(w, t, e.PID)
+			ce.dropBulk(w, t, e.PID, true)
 			return
 		}
 		start := time.Now()
@@ -1995,7 +1996,7 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 		}
 		w.blocked[cls].Add(1)
 		w.blockedNanos[cls].Add(uint64(time.Since(start)))
-		ce.dropBulk(w, t, e.PID)
+		ce.dropBulk(w, t, e.PID, false)
 		return
 	}
 	// Count the wait.
@@ -2024,7 +2025,7 @@ const (
 )
 
 // heavyTracker is a per-worker space-saving counter with a halving window. It is
-// written from the bulk dispatcher (one goroutine in production); the mutex only
+// written from the worker's bulk dispatcher (one per worker since the В8 shards); the mutex only
 // keeps concurrent callers (tests, Ingest from several goroutines) race-free.
 type heavyTracker struct {
 	mu  sync.Mutex
@@ -2087,12 +2088,21 @@ const (
 )
 
 // dropBulk discards a bulk task whose worker is congested and reports it.
-func (ce *CorrelationEngine) dropBulk(w *workerState, t *workerTask, pid uint32) {
+func (ce *CorrelationEngine) dropBulk(w *workerState, t *workerTask, pid uint32, heavy bool) {
 	workerTaskPool.Put(t)
 	w.bulkDropped.Add(1)
 	if fn := ce.bulkDropFn; fn != nil {
 		fn(pid)
 	}
+	if fn := ce.bulkDropClassFn; fn != nil {
+		fn(heavy)
+	}
+}
+
+// SetBulkDropClassFn registers fn, called for every congestion drop with whether the
+// pid was heavy on its worker (волна 9, 8.8.4: the light-pid residual by hop).
+func (ce *CorrelationEngine) SetBulkDropClassFn(fn func(heavy bool)) {
+	ce.bulkDropClassFn = fn
 }
 
 // SetBulkDropOnCongestion enables or disables Р5 (default enabled for engines
@@ -2186,6 +2196,16 @@ func (ce *CorrelationEngine) AnomalyEnabled() bool {
 
 // IngestWorkerCount returns the number of ingest workers (0 when the pool is off).
 func (ce *CorrelationEngine) IngestWorkerCount() int { return len(ce.ingestPool) }
+
+// IngestProcessedTotal is the number of events all ingest workers have handled — the
+// progress the liveness probe watches (волна 9: a wedged pipeline with a backlog).
+func (ce *CorrelationEngine) IngestProcessedTotal() uint64 {
+	var n uint64
+	for _, w := range ce.ingestPool {
+		n += w.processed.Load()
+	}
+	return n
+}
 
 // IngestWorkerQueueLenCap returns len/cap of ingest worker i's channel.
 func (ce *CorrelationEngine) IngestWorkerQueueLenCap(i int) (int, int) {
@@ -2543,8 +2563,13 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 				alert.Enrichment = *ep.Enrichment
 			}
 
-			// Attach full process tree for SOC triage.
-			alert.ProcessTree = getProcessTree()
+			// Attach full process tree for SOC triage — only to an alert that leaves the
+			// engine or reaches the enforcer. Волна 9, В4: a deduplicated alert is dropped
+			// below and nothing reads its tree (noise diagnostics do not), yet the lineage
+			// read was paid for it: 4,6% of CPU at 30 000 ops/s (profile n7, h7-host).
+			if !isDup || (ce.actionExecutor != nil && isEnforcedAction(alert.Action)) {
+				alert.ProcessTree = getProcessTree()
+			}
 
 			// Attach the most-recent pre-alert events for this PID when the per-PID
 			// buffer is enabled. The current event is already in the buffer (added at
@@ -2934,10 +2959,10 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 		for i := range alerts {
 			ce.incidentTracker.Add(alerts[i])
 		}
-		incidentIngestTotal.WithLabelValues(incidentIngestAccepted).Add(float64(len(alerts)))
+		incidentIngestAcceptedTotal.Add(float64(len(alerts)))
 	} else {
 		// №428: см. ту же ветку на асинхронном пути выше.
-		incidentIngestTotal.WithLabelValues(incidentIngestGated).Add(float64(len(alerts)))
+		incidentIngestGatedTotal.Add(float64(len(alerts)))
 	}
 
 	// Return alerts to caller for per-worker buffered flush (P1-4).

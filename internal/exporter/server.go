@@ -60,6 +60,7 @@ type Server struct {
 
 	// Health state
 	healthy            bool
+	livenessCheck      func() error // волна 9: /health/live fails when it returns an error
 	ready              bool
 	startTime          time.Time
 	collectorStatuses  map[string]CollectorStatus
@@ -226,6 +227,7 @@ func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enabl
 	}
 	handler = s.corsMiddleware(handler)
 	handler = stageMiddleware(handler)
+	handler = s.liveFirst(handler)
 
 	s.server = &http.Server{
 		Addr:         bindAddress,
@@ -306,6 +308,7 @@ func NewServerWithRBAC(bindAddress, metricsPath, healthPath string, enablePprof,
 	}
 	handler = s.corsMiddleware(handler)
 	handler = stageMiddleware(handler)
+	handler = s.liveFirst(handler)
 
 	s.server = &http.Server{
 		Addr:         bindAddress,
@@ -684,12 +687,31 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleLive handles the /health/live endpoint (liveness probe).
+// SetLivenessCheck registers fn, consulted by /health/live after the healthy flag:
+// a non-nil error fails the probe (волна 9: the event pipeline is wedged).
+func (s *Server) SetLivenessCheck(fn func() error) {
+	s.mu.Lock()
+	s.livenessCheck = fn
+	s.mu.Unlock()
+}
+
+// handleLive handles the /health/live endpoint (liveness probe). It is served
+// ahead of every middleware (see liveFirst): the probe must stay cheap when the
+// agent is saturated — kubelet killed a pod holding its plateau when a 1 s probe
+// timed out under a full CPU quota (волна 9, заход B, pod×8 at 60 000 ops/s).
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	healthy := s.healthy
+	check := s.livenessCheck
 	s.mu.RUnlock()
 
+	if healthy && check != nil {
+		if err := check(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("unhealthy: " + err.Error() + "\n"))
+			return
+		}
+	}
 	if healthy {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("alive\n"))
@@ -872,4 +894,15 @@ func (s *Server) AlertSilencer() *AlertSilencer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.alertSilencer
+}
+
+// liveFirst answers /health/live before any other middleware runs.
+func (s *Server) liveFirst(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == s.healthPath+"/live" {
+			s.handleLive(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

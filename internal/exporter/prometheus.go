@@ -221,6 +221,20 @@ var (
 		[]string{"collector", "queue"},
 	)
 
+	// EventsDroppedByPidClass splits the userspace bulk drops by the class of the
+	// pid that lost the event (волна 9, 8.8.4): heavy = a pid holding ≥ 1/8 of the
+	// recent window of that hop, light = every other pid. The 8.8.4 residual (2–3
+	// events of the 50 ops/s control processes at 2× capacity) was invisible by hop
+	// — this series names the hop of a light pid's loss. Kernel-side loss
+	// (ringbuf_full) has no pid and is not split.
+	EventsDroppedByPidClass = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_events_dropped_by_pid_class_total",
+			Help: "Userspace bulk drops by hop and by the class of the pid that lost the event (heavy: ≥ 1/8 of the hop's recent window; light: any other pid).",
+		},
+		[]string{"hop", "class"},
+	)
+
 	// EventsEmittedKernel counts events the kernel actually produced — a
 	// successful bpf_ringbuf_reserve() on the shared `events` ring buffer —
 	// by collector. This is the left-hand side of 5.9.6b's (№72) event
@@ -648,10 +662,52 @@ func RecordEvent(eventType string) {
 // label misconfigured to a per-pod value) pod, namespace, and node all collapse
 // to "other" so total series stay bounded by the event type alone.
 func RecordEventWithLabels(eventType, podName, namespace, node string) {
+	// Волна 9, В4: a host event (no pod, no namespace) hits the same handful of series
+	// over and over; the label hash per event was a share of CounterVec.WithLabelValues
+	// (4% CPU at 30 000 ops/s). Copy-on-write map: misses only on a new type/node.
+	if podName == "" && namespace == "" {
+		k := hostEventKey{eventType, node}
+		if c, ok := (*hostEventCounters.Load())[k]; ok {
+			c.Inc()
+			return
+		}
+		labels := eventsCardinalityLimiter.Normalize([]string{eventType, podName, namespace, node}, 1, 2, 3)
+		c := EventsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3])
+		c.Inc()
+		if labels[3] == node { // not collapsed by the limiter: safe to reuse
+			for {
+				old := hostEventCounters.Load()
+				next := make(map[hostEventKey]prometheus.Counter, len(*old)+1)
+				for kk, vv := range *old {
+					next[kk] = vv
+				}
+				next[k] = c
+				if hostEventCounters.CompareAndSwap(old, &next) {
+					break
+				}
+			}
+		}
+		return
+	}
 	labels := []string{eventType, podName, namespace, node}
 	// Collapse pod(1)/namespace(2)/node(3) to "other" if the limit is exceeded.
 	labels = eventsCardinalityLimiter.Normalize(labels, 1, 2, 3)
 	EventsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3]).Inc()
+}
+
+type hostEventKey struct{ eventType, node string }
+
+var hostEventCounters = func() *atomic.Pointer[map[hostEventKey]prometheus.Counter] {
+	p := &atomic.Pointer[map[hostEventKey]prometheus.Counter]{}
+	m := map[hostEventKey]prometheus.Counter{}
+	p.Store(&m)
+	return p
+}()
+
+// resetHostEventCache drops the cached host counters (tests that Reset EventsTotal).
+func resetHostEventCache() {
+	m := map[hostEventKey]prometheus.Counter{}
+	hostEventCounters.Store(&m)
 }
 
 // TLS event families for TLSEventsByFamily.
@@ -771,6 +827,12 @@ func init() {
 	for _, c := range ParseErrorCollectors {
 		EventsDroppedByQueue.WithLabelValues(c, QueueNameForPriority(true))
 		EventsDroppedByQueue.WithLabelValues(c, QueueNameForPriority(false))
+	}
+	// Волна 9: the pid-class split is present from the start (a zero, not an absent
+	// series, is what tells a light pid lost nothing at a hop).
+	for _, hop := range []string{"ringbuf_to_router", "router_to_queue", "worker_full"} {
+		EventsDroppedByPidClass.WithLabelValues(hop, "heavy")
+		EventsDroppedByPidClass.WithLabelValues(hop, "light")
 	}
 }
 
@@ -1128,6 +1190,15 @@ func RecordEventDrop(collector, hop string, highPriority bool) {
 	dropBreakdownMu.Lock()
 	dropBreakdown[dropHop{collector, hop}]++
 	dropBreakdownMu.Unlock()
+}
+
+// RecordDropPidClass counts one bulk drop at hop by pid class (see EventsDroppedByPidClass).
+func RecordDropPidClass(hop string, heavy bool) {
+	if heavy {
+		EventsDroppedByPidClass.WithLabelValues(hop, "heavy").Inc()
+	} else {
+		EventsDroppedByPidClass.WithLabelValues(hop, "light").Inc()
+	}
 }
 
 // RecordKernelDropN feeds n events lost in the kernel (reason ringbuf_full,

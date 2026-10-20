@@ -117,13 +117,19 @@ tracefs:
   hostPath: /sys/kernel/tracing
 
 # Liveness and readiness probes
+# Волна 9: timeoutSeconds 1 (the Kubernetes default) × 3 killed an agent that held
+# its plateau under overload — the probe goroutine waited on a full CPU quota for
+# more than a second (pod×8, 60 000 ops/s, exit 0 "Completed", not OOM). The agent
+# itself fails /health/live when the pipeline is wedged (backlog and no progress
+# for 60 s), so a dead loop is still restarted within ≈ 2 min.
 livenessProbe:
   httpGet:
     path: /health/live
     port: metrics
   initialDelaySeconds: 10
   periodSeconds: 10
-  failureThreshold: 3
+  timeoutSeconds: 5
+  failureThreshold: 6
 
 readinessProbe:
   httpGet:

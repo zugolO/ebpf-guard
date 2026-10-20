@@ -959,6 +959,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					slog.Uint64("pid", uint64(pid)))
 			}
 		})
+		engine.SetBulkDropClassFn(func(heavy bool) { exporter.RecordDropPidClass("worker_full", heavy) })
 	}
 
 	// Волна 8.5, P1: таблица процессов в ядре. Открывается ДО коллекторов — пока общий
@@ -1642,11 +1643,28 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// Wave 8.2, C1 (№539): the queues carry pooled *types.Event. Same depth, but a
 	// slot costs 8 bytes instead of sizeof(Event) until it is actually used.
 	highPriorityEventCh := make(chan *types.Event, eventQueueDepth)
-	lowPriorityEventCh := make(chan *types.Event, eventQueueDepth)
+	// Волна 9, В8 (решение владельца 18.10): the bulk queue is split by pid into one
+	// shard per ingest worker, each with its own dispatcher (see the consumer loop).
+	// The single bulk dispatcher was the head of line of host×8: parked 10–35 s of 60
+	// on the one worker that held three of eight hot pids while the other workers idled.
+	// The shards share the depth of the former single queue, so the memory bound of
+	// capQueueDepthByMemLimit holds for their sum.
+	lowShards := makeBulkShards(engine.IngestWorkerCount(), eventQueueDepth)
+	lowShardsSend := make([]chan<- *types.Event, len(lowShards))
+	for i, c := range lowShards {
+		lowShardsSend[i] = c
+	}
+	lowLen := func() int { return bulkShardsLen(lowShards) }
+	lowCap := func() int { return bulkShardsCap(lowShards) }
 
 	// Track queue depths for both priority levels
-	engine.SetQueueDepthFn(func() int { return len(highPriorityEventCh) + len(lowPriorityEventCh) }, func() int { return cap(highPriorityEventCh) + cap(lowPriorityEventCh) })
+	engine.SetQueueDepthFn(func() int { return len(highPriorityEventCh) + lowLen() }, func() int { return cap(highPriorityEventCh) + lowCap() })
 	exporter.RecordQueueDepth(0, eventQueueDepth*2)
+	// Волна 9: /health/live fails only on a wedged pipeline (backlog, no worker
+	// progress for a minute), never on a slow one. Synchronous engine — no workers to watch.
+	if engine.IngestWorkerCount() > 0 {
+		srv.SetLivenessCheck(newPipelineStall(engine.IngestProcessedTotal, func() int { return len(highPriorityEventCh) + lowLen() }).check)
+	}
 
 	// wave-8.1 item 9: peak depth of every pipeline queue, sampled at 1 Hz. The
 	// occupancy gauges are 30 s point readings and miss bursts.
@@ -1654,7 +1672,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Warn("queue high-water-mark metrics unavailable", slog.Any("err", qhErr))
 	} else {
 		qh.Track("event_high", func() int { return len(highPriorityEventCh) }, func() int { return cap(highPriorityEventCh) })
-		qh.Track("event_low", func() int { return len(lowPriorityEventCh) }, func() int { return cap(lowPriorityEventCh) })
+		qh.Track("event_low", lowLen, lowCap)
 		qh.Track("rego", func() int { l, _ := engine.RegoQueueLenCap(); return l }, func() int { _, c := engine.RegoQueueLenCap(); return c })
 		qh.Track("enforce", func() int { l, _ := engine.EnforceQueueLenCap(); return l }, func() int { _, c := engine.EnforceQueueLenCap(); return c })
 		for i := 0; i < engine.IngestWorkerCount(); i++ {
@@ -2258,7 +2276,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	priorityCollectors := make([]collector.Collector, 0, len(collectors))
 	for _, c := range collectors {
 		priorityCollectors = append(priorityCollectors,
-			collector.NewPriorityEventCollector(c, highPriorityEventCh, lowPriorityEventCh, bpStrategy, recordEventDrop, recordEventAccepted, slog.Default()))
+			collector.NewShardedPriorityEventCollector(c, highPriorityEventCh, lowShardsSend, bpStrategy, recordEventDrop, recordEventAccepted, slog.Default()))
 	}
 
 	// №473: ЗАПУСК КОЛЛЕКТОРОВ ОТЛОЖЕН ДО ГОТОВНОСТИ ПОТРЕБИТЕЛЯ.
@@ -2664,7 +2682,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				exporter.RecordQueueDepth(len(highPriorityEventCh)+len(lowPriorityEventCh), cap(highPriorityEventCh)+cap(lowPriorityEventCh))
+				exporter.RecordQueueDepth(len(highPriorityEventCh)+lowLen(), cap(highPriorityEventCh)+lowCap())
 				exporter.SetGoroutinePoolActive(activeWorkers.Load())
 			}
 		}
@@ -3057,8 +3075,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			BulkAccepted: lowPriorityAccepted.Load,
 			Fill: func() float64 {
 				f := 0.0
-				if c := cap(lowPriorityEventCh); c > 0 {
-					f = float64(len(lowPriorityEventCh)) / float64(c)
+				for _, sc := range lowShards {
+					if c := cap(sc); c > 0 {
+						if sf := float64(len(sc)) / float64(c); sf > f {
+							f = sf
+						}
+					}
 				}
 				for i := 0; i < engine.IngestWorkerCount(); i++ {
 					if l, c := engine.IngestWorkerQueueLenCap(i); c > 0 {
@@ -3197,7 +3219,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	slog.Info("event consumer entering loop",
 		slog.Duration("consumer_start_delay", consumerStartDelay),
 		slog.Int("queued_high", len(highPriorityEventCh)),
-		slog.Int("queued_low", len(lowPriorityEventCh)))
+		slog.Int("queued_low", lowLen()),
+		slog.Int("bulk_shards", len(lowShards)))
 
 	// Wave 8.1 (№530): protected and bulk events have their own dispatcher
 	// goroutines. A single dispatcher used to block in IngestAsync on a hot
@@ -3224,28 +3247,41 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			<-hiDone
-			// Wait for all in-flight dispatch goroutines to finish before shutdown.
-			if aerr := workerSem.Acquire(ctx, maxConcurrent); aerr != nil {
-				slog.Debug("shutdown: worker pool drain interrupted", slog.Any("error", aerr))
+	// Волна 9, В8: one bulk dispatcher per shard. Shard k only holds pids with
+	// pid&mask == k, so it only ever waits on ingest worker k; order inside a pid is
+	// kept because a pid always lands on the same shard and the same dispatcher.
+	var bulkWg sync.WaitGroup
+	for _, sc := range lowShards {
+		bulkWg.Add(1)
+		go func(sc chan *types.Event) {
+			defer bulkWg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case slot, ok := <-sc:
+					if !ok {
+						return
+					}
+					event := *slot
+					types.PutEvent(slot)
+					processEvent(ctx, event, false, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+				}
 			}
-			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration,
-				cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego,
-				prof, cfg.Profiler.StatePersistence, kpred.FinalFlush)
-			return nil
-
-		case slot, ok := <-lowPriorityEventCh:
-			if !ok {
-				return nil
-			}
-			event := *slot
-			types.PutEvent(slot)
-			processEvent(ctx, event, false, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
-		}
+		}(sc)
 	}
+
+	<-ctx.Done()
+	<-hiDone
+	bulkWg.Wait()
+	// Wait for all in-flight dispatch goroutines to finish before shutdown.
+	if aerr := workerSem.Acquire(ctx, maxConcurrent); aerr != nil {
+		slog.Debug("shutdown: worker pool drain interrupted", slog.Any("error", aerr))
+	}
+	gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration,
+		cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego,
+		prof, cfg.Profiler.StatePersistence, kpred.FinalFlush)
+	return nil
 }
 
 // processEvent handles a single event through the enrichment and correlation pipeline.

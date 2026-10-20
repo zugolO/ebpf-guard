@@ -17,12 +17,19 @@ import (
 var _ Collector = (*PriorityEventCollector)(nil)
 
 // PriorityEventCollector wraps a collector and routes events to priority-specific channels.
-// High-priority events (network, dns) go to highPriorityCh, others to lowPriorityCh.
+// High-priority events (network, dns) go to highPriorityCh, others to the pid shard of the bulk queue.
 // Both queues carry pooled *types.Event; the consumer must types.PutEvent each one.
 type PriorityEventCollector struct {
 	collector       Collector
 	highPriorityCh  chan<- *types.Event
-	lowPriorityCh   chan<- *types.Event
+	// lowShards are the bulk queue split by pid (волна 9, В8): shard pid&lowMask feeds
+	// exactly the ingest worker pid&mask, so one dispatcher blocked on a hot worker
+	// stalls only that worker's pids. One shard = the former single bulk queue.
+	lowShards []chan<- *types.Event
+	lowMask   uint32
+	// heavy names the pids dominating this collector's bulk stream, only to split the
+	// router_to_queue drops by pid class (волна 9, 8.8.4). routeEvent is its only writer.
+	heavy pidHeavyTracker
 	eventPriorityFn func(types.EventType) bool
 	strategy        BackpressureStrategy
 	droppedFn       func(collectorName string, isHighPriority bool)
@@ -41,13 +48,23 @@ type PriorityEventCollector struct {
 // droppedFn and acceptedFn are both optional; together they let the caller
 // compute a loss fraction rather than only an absolute drop count.
 func NewPriorityEventCollector(c Collector, highPriorityCh, lowPriorityCh chan<- *types.Event, strategy BackpressureStrategy, droppedFn, acceptedFn func(collectorName string, isHighPriority bool), logger *slog.Logger) *PriorityEventCollector {
+	return NewShardedPriorityEventCollector(c, highPriorityCh, []chan<- *types.Event{lowPriorityCh}, strategy, droppedFn, acceptedFn, logger)
+}
+
+// NewShardedPriorityEventCollector is NewPriorityEventCollector with the bulk queue split
+// into len(lowShards) pid shards; len(lowShards) must be a power of two.
+func NewShardedPriorityEventCollector(c Collector, highPriorityCh chan<- *types.Event, lowShards []chan<- *types.Event, strategy BackpressureStrategy, droppedFn, acceptedFn func(collectorName string, isHighPriority bool), logger *slog.Logger) *PriorityEventCollector {
+	if len(lowShards) == 0 || len(lowShards)&(len(lowShards)-1) != 0 {
+		panic("collector: bulk shard count must be a power of two")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &PriorityEventCollector{
 		collector:       c,
 		highPriorityCh:  highPriorityCh,
-		lowPriorityCh:   lowPriorityCh,
+		lowShards:       lowShards,
+		lowMask:         uint32(len(lowShards) - 1),
 		eventPriorityFn: defaultEventPriority,
 		strategy:        strategy,
 		droppedFn:       droppedFn,
@@ -138,7 +155,8 @@ func (p *PriorityEventCollector) Close() error {
 // background context here would wedge the router for the process lifetime.
 func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Event) {
 	isHighPriority := p.eventPriorityFn(event.Type)
-	targetCh := p.lowPriorityCh
+	lowCh := p.lowShards[event.PID&p.lowMask]
+	targetCh := lowCh
 	if isHighPriority {
 		targetCh = p.highPriorityCh
 	}
@@ -147,9 +165,15 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 	// what lets /health distinguish "we lost file noise" from "we lost the
 	// security signal".
 	dropped := false
+	if !isHighPriority {
+		p.heavy.note(event.PID)
+	}
 	droppedFunc := func() {
 		dropped = true
 		p.dropLogger.record(p.dropLog, "router_to_queue")
+		if !isHighPriority {
+			exporter.RecordDropPidClass("router_to_queue", p.heavy.isHeavy(event.PID))
+		}
 		if p.droppedFn != nil {
 			p.droppedFn(p.collector.Name(), isHighPriority)
 		}
@@ -179,7 +203,7 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 	if !isHighPriority && fileEventMustKeep(&event) {
 		kept := false
 		select {
-		case p.lowPriorityCh <- slot:
+		case lowCh <- slot:
 			kept = true
 		default:
 			select {

@@ -35,6 +35,8 @@ spec:
               port: metrics
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5     # волна 9: 1 с убивал агент под перегрузкой (см. values.yaml)
+            failureThreshold: 6
           readinessProbe:
             httpGet:
               path: /health/ready

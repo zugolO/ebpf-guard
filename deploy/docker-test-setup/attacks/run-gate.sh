@@ -887,6 +887,18 @@ if [ -n "$IDLE_ALERTS_END" ] && [ -s "$IDLE_ALERTS_END" ] && [ -s "$baseline_ale
         | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)) | map(.rule_id) | map(select(. != null)))
         | unique | .[]' 2>/dev/null | sort -u)
 fi
+# Волна 9 (В5, слепое окно 548): пятая фаза — «старт», интервал от старта
+# агента до снимка idle-start. Стор чистится перед рестартом, поэтому всё, что
+# лежит в IDLE_ALERTS_START, сработало именно в этом интервале. Ночь 8.7: 4
+# добавленных типа (cron_spawns_shell, drift_new_network_common_c2_ports,
+# k8s_sa_token_theft, k8s_token_access — coredns, local-path-prov, cron sh)
+# сработали в первые 35 с после старта и стояли «фаза не определена», хотя
+# их окно измерено — просто ни одно из трёх прежних его не называло.
+startup_rule_ids=""
+if [ -n "$IDLE_ALERTS_START" ] && [ -s "$IDLE_ALERTS_START" ] \
+    && jq -e 'type == "array"' "$IDLE_ALERTS_START" >/dev/null 2>&1; then
+    startup_rule_ids=$(jq -r '[.[] | .rule_id | select(. != null)] | unique | .[]' "$IDLE_ALERTS_START" 2>/dev/null | sort -u)
+fi
 
 # 6. Детект жив: >= 43 типов + темп алертов от атакующих >= 74/мин.
 # Абсолютный порог 850 (бывшая формулировка) привязан к длине окна: замер №1
@@ -1321,6 +1333,8 @@ else
         added_attack_count=0
         added_idle_count=0
         added_gap_count=0
+        added_startup_count=0
+        added_startup_ids=""
         added_undetermined_count=0
         added_undetermined_ids=""
         added_induced_count=0
@@ -1329,10 +1343,11 @@ else
         echo "  добавлено (+$added_count):"
         while IFS= read -r rid; do
             [ -z "$rid" ] && continue
-            in_attack=0; in_idle=0; in_gap=0
+            in_attack=0; in_idle=0; in_gap=0; in_startup=0
             echo "$added_attack_list" | grep -qx "$rid" && in_attack=1
             echo "$added_idle_list" | grep -qx "$rid" && in_idle=1
             echo "$gap_rule_ids" | grep -qx "$rid" && in_gap=1
+            echo "$startup_rule_ids" | grep -qx "$rid" && in_startup=1
             # 5.9.6h (находка №76): третья фаза ("gap" — слепое окно
             # idle-конец → attack-baseline) закрывает "фаза не определена"
             # для приростов, объяснимых именно этим окном, а не отсутствием
@@ -1382,6 +1397,12 @@ else
                 # называть источником DNS-контроль значило бы приписывать ему
                 # чужие типы (та же неточность, что поправка к №67).
                 phase="наведено шагом преflight'а до открытия baseline (5.9.8a/5.9.9d, №100) — ни одно из измеряемых окон не применимо; источник — один из шагов вне окна, не обязательно контроль DNS"
+            elif [ "$in_startup" -eq 1 ]; then
+                # Волна 9: последний резерв перед «не определено» — алерт уже
+                # лежал в снимке idle-start (старт агента → idle-start). Ниже
+                # окон и преflight'а: в архивах до очистки стора на рестарте
+                # alerts-start нёс и чужие фазы.
+                phase="startup (до снимка idle-start: фон ноды в первые секунды агента; не детект атаки)"
             elif [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ]; then
                 phase="фаза не определена — IDLE_METRICS_START/END не заданы"
             elif [ -z "$IDLE_ALERTS_END" ]; then
@@ -1403,13 +1424,16 @@ else
             if [ "$in_induced" -eq 1 ] && [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
                 added_induced_count=$((added_induced_count + 1))
                 added_induced_ids="$added_induced_ids$rid"$'\n'
+            elif [ "$in_induced" -eq 0 ] && [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ] && [ "$in_startup" -eq 1 ]; then
+                added_startup_count=$((added_startup_count + 1))
+                added_startup_ids="$added_startup_ids$rid"$'\n'
             elif [ "$in_induced" -eq 0 ] && [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
                 added_undetermined_count=$((added_undetermined_count + 1))
                 added_undetermined_ids="$added_undetermined_ids$rid"$'\n'
             fi
             echo "    + $rid ($phase)"
         done <<< "$added_types"
-        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count, gap=$added_gap_count, наведено преflight-шагом=$added_induced_count, не определено=$added_undetermined_count (сумма может превышать $added_count — правило, выросшее в нескольких окнах, считается в каждом)"
+        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count, gap=$added_gap_count, startup=$added_startup_count, наведено преflight-шагом=$added_induced_count, не определено=$added_undetermined_count (сумма может превышать $added_count — правило, выросшее в нескольких окнах, считается в каждом)"
         if [ "$added_undetermined_count" -gt 0 ] && [ -z "$IDLE_ALERTS_END" ]; then
             echo "  (5.9.6h: gap-окно не проверялось на этом прогоне — IDLE_ALERTS_END не задан; \"не определено\" выше не означает, что фаза действительно отсутствует)"
         fi
@@ -1431,6 +1455,12 @@ else
         # правило из общей таблицы фаз выше — 5.9.6f подняла в базу именно
         # так три ssh-артефакта и один ручной dpkg-query, не заметив, что
         # это единственный случай без определённой фазы.
+        # Волна 9: фаза «старт» — фон ноды в первые секунды агента, не детект
+        # атаки; в базу не заносится так же, как «не определено».
+        if [ "$added_startup_count" -gt 0 ]; then
+            echo "  не заносить в detection-baseline.txt (только фаза startup — до снимка idle-start, $added_startup_count шт.):"
+            echo "$added_startup_ids" | grep -v '^$' | sed 's/^/    ~ /'
+        fi
         if [ "$added_undetermined_count" -gt 0 ]; then
             echo "  не заносить в detection-baseline.txt (фаза не определена, $added_undetermined_count шт.):"
             echo "$added_undetermined_ids" | grep -v '^$' | sed 's/^/    ! /'
@@ -3026,7 +3056,7 @@ else
                     elif [ "$added_count" -lt 3 ]; then
                         pass "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, 0 алертов дерева измерителя, означающих промах подхвата${harness_note} — окно не слепое по составу (5.9.7g)"
                     elif [ "$added_undetermined_count" -eq 0 ]; then
-                        pass "объём слепого окна $blind_new_alerts > 5, 0 алертов дерева измерителя, означающих промах подхвата${harness_note}, и у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap) — окно не слепое (5.9.6h/5.9.8g)"
+                        pass "объём слепого окна $blind_new_alerts > 5, 0 алертов дерева измерителя, означающих промах подхвата${harness_note}, и у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap/startup) — окно не слепое (5.9.6h/5.9.8g)"
                     else
                         fail "объём слепого окна $blind_new_alerts > 5, 0 алертов дерева измерителя, означающих промах подхвата${harness_note}, но $added_undetermined_count добавленных типов в критерии 6 остались с неопределённой фазой — состав не объяснён (5.9.6h)"
                     fi

@@ -415,7 +415,7 @@ func TestIngestAsyncPriority_HeavyPidOpenSurvivesViaProtectedChannel(t *testing.
 	ev := func(op uint8) types.Event {
 		return types.Event{Type: types.EventFileAccess, PID: 7, File: &types.FileEvent{Op: op}}
 	}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 2*heavyShare; i++ {
 		ce.IngestAsyncPriority(ctx, ev(1), false) // reads fill bulk then drop
 	}
 	before := dropped

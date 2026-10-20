@@ -76,9 +76,42 @@ const beaconInsufficientDataCV = 999.0
 // actual periodic C2 beacon (wave 6.2.2, finding №231) from a single
 // one-off connection to a non-standard port, which the plain
 // port/comm-allowlist condition it replaces could not tell apart.
+//
+// Волна 9, заход B (В8): the state is split into beaconShardCount shards by pid.
+// One mutex over the whole map was taken by every ingest worker on each TCP-connect
+// event (Record, plus Stats once per rule condition): 12 + 8 of 160 worker snapshots
+// at host×8 sat in it. Keys of one pid always share a shard, so per-key semantics
+// are unchanged.
 type BeaconIntervalTracker struct {
+	shards [beaconShardCount]beaconShard
+}
+
+type beaconShard struct {
 	mu    sync.Mutex
 	state map[beaconKey]*beaconState
+}
+
+const (
+	beaconShardCount = 16
+	// beaconShardMaxKeys: the total cap is beaconMaxKeys split over 4 shards' worth, i.e.
+	// at most beaconShardCount*beaconShardMaxKeys = 32768 keys (≈ 8 MB) in the worst case.
+	beaconShardMaxKeys = beaconMaxKeys / 4
+)
+
+func (b *BeaconIntervalTracker) shard(pid uint32) *beaconShard {
+	return &b.shards[pid%beaconShardCount]
+}
+
+// keyCount returns the number of tracked destinations (tests, diagnostics).
+func (b *BeaconIntervalTracker) keyCount() int {
+	n := 0
+	for i := range b.shards {
+		sh := &b.shards[i]
+		sh.mu.Lock()
+		n += len(sh.state)
+		sh.mu.Unlock()
+	}
+	return n
 }
 
 type beaconKey struct {
@@ -95,7 +128,11 @@ type beaconState struct {
 
 // NewBeaconIntervalTracker creates an empty tracker.
 func NewBeaconIntervalTracker() *BeaconIntervalTracker {
-	return &BeaconIntervalTracker{state: make(map[beaconKey]*beaconState)}
+	b := &BeaconIntervalTracker{}
+	for i := range b.shards {
+		b.shards[i].state = make(map[beaconKey]*beaconState)
+	}
+	return b
 }
 
 // globalBeaconInterval is the package-level tracker used by getFieldValue to
@@ -139,17 +176,18 @@ func (st *beaconState) push(now time.Time) {
 func (b *BeaconIntervalTracker) Record(pid uint32, daddr [16]byte, dport uint16, now time.Time) {
 	key := beaconKey{pid: pid, daddr: daddr, dport: dport}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	sh := b.shard(pid)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
 
-	st, ok := b.state[key]
+	st, ok := sh.state[key]
 	if !ok {
-		if len(b.state) >= beaconMaxKeys && b.evictStale(now) == 0 {
+		if len(sh.state) >= beaconShardMaxKeys && b.evictStale(sh, now) == 0 {
 			beaconKeysDroppedTotal.Inc()
 			return
 		}
 		st = &beaconState{ring: make([]time.Time, beaconInitialSamples)}
-		b.state[key] = st
+		sh.state[key] = st
 	}
 
 	b.prune(st, now)
@@ -158,13 +196,13 @@ func (b *BeaconIntervalTracker) Record(pid uint32, daddr [16]byte, dport uint16,
 
 // evictStale drops keys whose newest timestamp has fallen out of the window.
 // Called only when the tracker hits its key cap between Cleanup cycles;
-// b.mu must be held.
-func (b *BeaconIntervalTracker) evictStale(now time.Time) int {
+// the shard mutex must be held.
+func (b *BeaconIntervalTracker) evictStale(sh *beaconShard, now time.Time) int {
 	cutoff := now.Add(-beaconWindow)
 	removed := 0
-	for key, st := range b.state {
+	for key, st := range sh.state {
 		if st.size == 0 || st.at(st.size-1).Before(cutoff) {
-			delete(b.state, key)
+			delete(sh.state, key)
 			removed++
 		}
 	}
@@ -178,10 +216,11 @@ func (b *BeaconIntervalTracker) evictStale(now time.Time) int {
 func (b *BeaconIntervalTracker) Stats(pid uint32, daddr [16]byte, dport uint16, now time.Time) (count int, cv float64) {
 	key := beaconKey{pid: pid, daddr: daddr, dport: dport}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	sh := b.shard(pid)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
 
-	st, ok := b.state[key]
+	st, ok := sh.state[key]
 	if !ok {
 		return 0, beaconInsufficientDataCV
 	}
@@ -221,15 +260,17 @@ func (b *BeaconIntervalTracker) Stats(pid uint32, daddr [16]byte, dport uint16, 
 // alongside RateLimiter.Cleanup / ConnFrequencyTracker.Cleanup.
 func (b *BeaconIntervalTracker) Cleanup(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	removed := 0
-	for key, st := range b.state {
-		if st.size == 0 || st.at(st.size-1).Before(cutoff) {
-			delete(b.state, key)
-			removed++
+	for i := range b.shards {
+		sh := &b.shards[i]
+		sh.mu.Lock()
+		for key, st := range sh.state {
+			if st.size == 0 || st.at(st.size-1).Before(cutoff) {
+				delete(sh.state, key)
+				removed++
+			}
 		}
+		sh.mu.Unlock()
 	}
 	return removed
 }

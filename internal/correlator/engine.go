@@ -402,17 +402,24 @@ type workerState struct {
 	// Read by CounterFuncs.
 	blocked      [2]atomic.Uint64
 	blockedNanos [2]atomic.Uint64
+	// Волна 9, заход B (В8): how many events this worker handled and how long it
+	// spent in handle(). busy ≈ 1 s/s on one worker while the others idle is the
+	// head-of-line signature of the single bulk dispatcher. waitTimeouts counts
+	// non-heavy bulk events that waited bulkCongestionWait and were dropped.
+	processed    atomic.Uint64
+	busyNanos    atomic.Uint64
+	waitTimeouts atomic.Uint64
+	// lastWaitTimeout: unix nanos of the last patient wait that timed out (circuit breaker).
+	lastWaitTimeout atomic.Int64
 	// Волна 8.8, Р5: a bulk event for a full worker channel is dropped (and
 	// counted) when its pid is the worker's dominant one, instead of stopping the
 	// single bulk dispatcher for every other pid.
 	bulkDropped atomic.Uint64
-	// heavyPID/heavyCnt: single-counter majority tracker (Misra–Gries, k=1) of the
-	// pid that dominates this worker's bulk traffic. While the worker is
-	// congested only that pid's events are dropped; other pids sharing the worker
-	// wait for a slot (one frees every worker service time, ~30 µs) and keep
-	// their events — the isolation 8.8.4 asks for.
-	heavyPID atomic.Uint32
-	heavyCnt atomic.Int32
+	// heavy tracks which pids dominate this worker's bulk traffic (see heavyTracker).
+	// While the worker is congested only those pids' events are dropped; other
+	// pids sharing the worker wait for a slot (one frees every worker service
+	// time, ~30 µs) and keep their events — the isolation 8.8.4 asks for.
+	heavy heavyTracker
 	ad *profiler.AnomalyDetector // nil when anomaly detection is disabled
 }
 
@@ -1811,6 +1818,24 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		}, func() float64 { return float64(w.bulkDropped.Load()) })); err != nil {
 			return err
 		}
+		for _, c := range []prometheus.Collector{
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Name: "ebpf_guard_ingest_worker_processed_total", ConstLabels: prometheus.Labels{"worker": strconv.Itoa(i)},
+				Help: "Events handled by this ingest worker (волна 9, В8).",
+			}, func() float64 { return float64(w.processed.Load()) }),
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Name: "ebpf_guard_ingest_worker_busy_seconds_total", ConstLabels: prometheus.Labels{"worker": strconv.Itoa(i)},
+				Help: "Seconds this ingest worker spent handling events (rate ≈ 1 = saturated, волна 9, В8).",
+			}, func() float64 { return float64(w.busyNanos.Load()) / 1e9 }),
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Name: "ebpf_guard_ingest_worker_wait_timeouts_total", ConstLabels: prometheus.Labels{"worker": strconv.Itoa(i)},
+				Help: "Non-heavy bulk events that waited for a slot of this worker, timed out and were dropped (волна 9, В8).",
+			}, func() float64 { return float64(w.waitTimeouts.Load()) }),
+		} {
+			if err := reg.Register(c); err != nil {
+				return err
+			}
+		}
 		for cls, name := range []string{"bulk", "protected"} {
 			cls := cls
 			lbl := prometheus.Labels{"worker": strconv.Itoa(i), "class": name}
@@ -1909,7 +1934,7 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 	if protected {
 		ch, cls = w.chHi, 1
 	} else if ce.bulkDropOnCongestion {
-		w.noteBulk(e.PID)
+		w.heavy.note(e.PID)
 	}
 	select {
 	case ch <- t:
@@ -1930,7 +1955,7 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 		// service rate (54 s of 60 parked on one worker in Е6) and starved every
 		// other worker. Any other pid on the worker waits briefly for a slot (one
 		// frees every service time) and keeps its event.
-		if w.heavyPID.Load() == e.PID {
+		if w.heavy.isHeavy(e.PID) {
 			// open и мутации файла не теряются даже у доминирующего pid (решение владельца
 			// 18.10): при полном bulk-канале они идут в protected-канал воркера без ожидания.
 			if e.Type == types.EventFileAccess && e.File != nil && e.File.Op != 1 && e.File.Op != 2 {
@@ -1944,7 +1969,16 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 			return
 		}
 		start := time.Now()
-		timer := time.NewTimer(bulkCongestionWait)
+		// Волна 9, заход B (8.8.4): a non-heavy pid's event waits long enough to ride out a
+		// worker stall (GC, a CFS-throttled pod) — 3 ms dropped 3…7 events of the 50 ops/s
+		// control processes per 60 s on the hot worker. Circuit breaker: after a timeout the
+		// worker is considered stuck and the short wait applies for bulkWaitBreaker, so a
+		// wedged worker cannot hold the single bulk dispatcher for 150 ms per light event.
+		wait := bulkCongestionWaitPatient
+		if last := w.lastWaitTimeout.Load(); last != 0 && start.UnixNano()-last < int64(bulkWaitBreaker) {
+			wait = bulkCongestionWait
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case ch <- t:
 			timer.Stop()
@@ -1956,6 +1990,8 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 			workerTaskPool.Put(t)
 			return
 		case <-timer.C:
+			w.waitTimeouts.Add(1)
+			w.lastWaitTimeout.Store(time.Now().UnixNano())
 		}
 		w.blocked[cls].Add(1)
 		w.blockedNanos[cls].Add(uint64(time.Since(start)))
@@ -1973,26 +2009,82 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 	w.blockedNanos[cls].Add(uint64(time.Since(start)))
 }
 
-// heavyTrackerCap bounds the majority counter so the candidate can change within
-// about that many events when the traffic mix shifts.
-const heavyTrackerCap = 64
+// Heavy-pid tracker (волна 9, заход B, В8). The k=1 majority tracker of 8.8 named
+// ONE dominant pid per worker; with three equal hot pids on one worker (8 generator
+// processes over 4 workers, host×8) none dominated, every event of all three waited
+// for a slot, and the single bulk dispatcher sat on that worker's channel for
+// 25–35 s of each 60 s step while the other workers starved (b1 host×8: block
+// bulk/wK = 25,5 / 35,1 / 17,9 с, K = the worker with three pids; 8.8.2 = 0,49).
+// Now up to heavySlots pids per worker are counted over a window of heavyWindow
+// bulk events; a pid holding ≥ 1/8 of the window is heavy.
+const (
+	heavySlots  = 8
+	heavyWindow = 256
+	heavyShare  = heavyWindow / 8
+)
 
-// noteBulk updates the worker's majority-pid tracker with one bulk event.
-func (w *workerState) noteBulk(pid uint32) {
-	if w.heavyPID.Load() == pid {
-		if w.heavyCnt.Add(1) > heavyTrackerCap {
-			w.heavyCnt.Store(heavyTrackerCap)
-		}
-		return
-	}
-	if w.heavyCnt.Add(-1) < 0 {
-		w.heavyPID.Store(pid)
-		w.heavyCnt.Store(1)
-	}
+// heavyTracker is a per-worker space-saving counter with a halving window. It is
+// written from the bulk dispatcher (one goroutine in production); the mutex only
+// keeps concurrent callers (tests, Ingest from several goroutines) race-free.
+type heavyTracker struct {
+	mu  sync.Mutex
+	pid [heavySlots]uint32
+	cnt [heavySlots]int32
+	n   int32
 }
+
+// note counts one bulk event of pid.
+func (h *heavyTracker) note(pid uint32) {
+	h.mu.Lock()
+	slot, minI := -1, 0
+	for i := 0; i < heavySlots; i++ {
+		if h.cnt[i] > 0 && h.pid[i] == pid {
+			slot = i
+			break
+		}
+		if h.cnt[i] < h.cnt[minI] {
+			minI = i
+		}
+	}
+	if slot >= 0 {
+		h.cnt[slot]++
+	} else {
+		h.pid[minI], h.cnt[minI] = pid, 1
+	}
+	if h.n++; h.n >= heavyWindow {
+		for i := range h.cnt {
+			h.cnt[i] >>= 1
+		}
+		h.n = 0
+	}
+	h.mu.Unlock()
+}
+
+// isHeavy reports whether pid holds at least heavyShare of the recent window.
+func (h *heavyTracker) isHeavy(pid uint32) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := 0; i < heavySlots; i++ {
+		if h.cnt[i] > 0 && h.pid[i] == pid {
+			return h.cnt[i] >= heavyShare
+		}
+	}
+	return false
+}
+
+// hiFairness is how many protected events a worker handles in a row before it takes
+// one waiting bulk event (see runIngestWorker). Protected keeps ≥ 8/9 of the service.
+const hiFairness = 8
 
 // Bulk congestion policy (волна 8.8, Р5).
 const bulkCongestionWait = 3 * time.Millisecond
+
+// bulkCongestionWaitPatient is the first wait of a non-heavy pid; bulkWaitBreaker is how long
+// the short wait applies after a patient one timed out.
+const (
+	bulkCongestionWaitPatient = 150 * time.Millisecond
+	bulkWaitBreaker           = time.Second
+)
 
 // dropBulk discards a bulk task whose worker is congested and reports it.
 func (ce *CorrelationEngine) dropBulk(w *workerState, t *workerTask, pid uint32) {
@@ -2136,6 +2228,7 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 	handle := func(task *workerTask) {
 		tctx, ev := task.ctx, task.event
 		workerTaskPool.Put(task)
+		handleStart := time.Now()
 		// Age by event class (not by channel): comparable between split and
 		// legacy dispatch, where protected events share the bulk channel.
 		cls := ingestAgeBulk
@@ -2156,12 +2249,34 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 			}
 		}
 		profstage.Set(profstage.IngestLoop)
+		w.processed.Add(1)
+		w.busyNanos.Add(uint64(time.Since(handleStart)))
 	}
 
 	// Both channels are closed together by closeIngestChannels; a closed one is
 	// set to nil (blocks forever in select) and the worker exits when both are.
 	hi, lo := w.chHi, w.ch
+	hiStreak := 0
 	for hi != nil || lo != nil {
+		// Волна 9, заход B (8.8.4): the protected channel is refilled at once by a blocked
+		// protected dispatcher, so with strict priority a saturated worker never reached
+		// its bulk channel and a light pid's bulk event waiting for a slot timed out after
+		// bulkCongestionWait (host ×1, 30 000 ops/s: 373 timeouts on the hot worker,
+		// 17…78 lost events of 50 ops/s control processes). After hiFairness protected
+		// events in a row one bulk event is taken if one is waiting.
+		if hiStreak >= hiFairness && lo != nil {
+			hiStreak = 0
+			select {
+			case task, ok := <-lo:
+				if !ok {
+					lo = nil
+					continue
+				}
+				handle(task)
+				continue
+			default:
+			}
+		}
 		// Protected events first: never queue behind a bulk backlog.
 		if hi != nil {
 			select {
@@ -2170,11 +2285,13 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 					hi = nil
 					continue
 				}
+				hiStreak++
 				handle(task)
 				continue
 			default:
 			}
 		}
+		hiStreak = 0
 		select {
 		case task, ok := <-hi:
 			if !ok {

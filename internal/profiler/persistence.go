@@ -299,8 +299,8 @@ func SaveDetectorsState(detectors []*AnomalyDetector, path string) error {
 		if !haveLearner {
 			ad.learner.mu.RLock()
 			startTime = ad.learner.startTime
-			sampleCount = ad.learner.sampleCount
-			learningComplete = ad.learner.learningComplete
+			sampleCount = ad.learner.sampleCount.Load()
+			learningComplete = ad.learner.learningComplete.Load()
 			ad.learner.mu.RUnlock()
 			ad.mu.RLock()
 			learningPeriod = ad.learningPeriod
@@ -406,8 +406,8 @@ func LoadDetectorsState(detectors []*AnomalyDetector, path string, learningPerio
 
 		ad.learner.mu.Lock()
 		ad.learner.startTime = state.LearningStartTime
-		ad.learner.sampleCount = state.SampleCount
-		ad.learner.learningComplete = state.LearningComplete
+		ad.learner.sampleCount.Store(state.SampleCount)
+		ad.learner.learningComplete.Store(state.LearningComplete)
 		ad.learner.mu.Unlock()
 
 		if state.LearningComplete {
@@ -458,8 +458,8 @@ func (ad *AnomalyDetector) SaveState(path string) error {
 	// Collect learner state under its lock.
 	ad.learner.mu.RLock()
 	startTime := ad.learner.startTime
-	sampleCount := ad.learner.sampleCount
-	learningComplete := ad.learner.learningComplete
+	sampleCount := ad.learner.sampleCount.Load()
+	learningComplete := ad.learner.learningComplete.Load()
 	ad.learner.mu.RUnlock()
 
 	// Collect config under the detector lock.
@@ -544,8 +544,8 @@ func (ad *AnomalyDetector) LoadState(path string, learningPeriod time.Duration) 
 	// Restore learner.
 	ad.learner.mu.Lock()
 	ad.learner.startTime = state.LearningStartTime
-	ad.learner.sampleCount = state.SampleCount
-	ad.learner.learningComplete = state.LearningComplete
+	ad.learner.sampleCount.Store(state.SampleCount)
+	ad.learner.learningComplete.Store(state.LearningComplete)
 	ad.learner.mu.Unlock()
 
 	if state.LearningComplete {

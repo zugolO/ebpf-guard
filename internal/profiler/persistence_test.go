@@ -19,7 +19,7 @@ func TestSaveAndLoadState_RoundTrip(t *testing.T) {
 	// Force learning complete by backdating startTime and setting sample count.
 	ad.learner.mu.Lock()
 	ad.learner.startTime = time.Now().Add(-2 * learningPeriod)
-	ad.learner.sampleCount = 200
+	ad.learner.sampleCount.Store(200)
 	ad.learner.mu.Unlock()
 
 	// ProcessEvent calls IsLearningComplete which will flip the atomic flag.
@@ -63,7 +63,7 @@ func TestLoadState_StaleStateIgnored(t *testing.T) {
 	ad := NewAnomalyDetectorWithContext(ctx, 0.8, learningPeriod, 0.3)
 
 	ad.learner.mu.Lock()
-	ad.learner.learningComplete = true
+	ad.learner.learningComplete.Store(true)
 	ad.learner.mu.Unlock()
 	ad.learningComplete.Store(true)
 
@@ -116,8 +116,8 @@ func TestSaveState_ProfilesRoundTrip(t *testing.T) {
 	// Force learning complete.
 	ad.learner.mu.Lock()
 	ad.learner.startTime = time.Now().Add(-2 * learningPeriod)
-	ad.learner.sampleCount = 200
-	ad.learner.learningComplete = true
+	ad.learner.sampleCount.Store(200)
+	ad.learner.learningComplete.Store(true)
 	ad.learner.mu.Unlock()
 	ad.learningComplete.Store(true)
 

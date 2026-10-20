@@ -153,9 +153,7 @@ func TestBeaconIntervalTracker_KeyCapDropsAndCountsInsteadOfGrowing(t *testing.T
 	for i := 0; i < beaconMaxKeys+100; i++ {
 		tr.Record(9, mkAddr(i), 4444, now)
 	}
-	tr.mu.Lock()
-	keys := len(tr.state)
-	tr.mu.Unlock()
+	keys := tr.keyCount()
 	assert.LessOrEqual(t, keys, beaconMaxKeys, "the tracker must not grow past its key cap")
 
 	// Once the window has passed, stale keys are evicted to make room again.

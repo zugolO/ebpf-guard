@@ -9,9 +9,11 @@ package correlator
 // мьютексом трекера даёт тестам ту же чистую доску без гонки.
 
 func (b *BeaconIntervalTracker) resetForTest() {
-	b.mu.Lock()
-	b.state = make(map[beaconKey]*beaconState)
-	b.mu.Unlock()
+	for i := range b.shards {
+		b.shards[i].mu.Lock()
+		b.shards[i].state = make(map[beaconKey]*beaconState)
+		b.shards[i].mu.Unlock()
+	}
 }
 
 func (c *ConnFrequencyTracker) resetForTest() {

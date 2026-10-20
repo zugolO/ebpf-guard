@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -44,9 +45,33 @@ var enrichCgroupRecovered = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "pid→pod misses recovered through the in-kernel cgroup id (item 10 wave 6.6).",
 })
 
-func init() {
-	for _, r := range []string{MissProcGone, MissNoContainer, MissNoWatcher} {
-		enrichMissByReason.WithLabelValues(r)
+// enrichPidPath counts events that went to the /proc pid path because their
+// in-kernel cgroup id was unusable (0 = not carried, 1 = cgroup2 root), by event
+// type and kind. Волна 9, заход B (В4, Н6): 70% of router_enrich CPU was
+// getEnrichmentInfo → ReadFile on host load with a cgroup-v2 node, and which
+// events take that path was not visible anywhere.
+var enrichPidPath = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ebpf_guard_k8s_enrichment_pid_path_total",
+	Help: "Events resolved through the /proc pid path because the cgroup id was unusable, by event type and kind (zero|root).",
+}, []string{"type", "kind"})
+
+// enrichMiss holds the three miss counters resolved once: WithLabelValues hashes the label
+// on every call and the host path bumps one per event (волна 9, В4: 1,1% CPU at 30 000 ops/s).
+var (
+	enrichMissProcGone    = enrichMissByReason.WithLabelValues(MissProcGone)
+	enrichMissNoContainer = enrichMissByReason.WithLabelValues(MissNoContainer)
+	enrichMissNoWatcher   = enrichMissByReason.WithLabelValues(MissNoWatcher)
+)
+
+// missCounter returns the pre-resolved counter for a miss reason.
+func missCounter(reason string) prometheus.Counter {
+	switch reason {
+	case MissProcGone:
+		return enrichMissProcGone
+	case MissNoWatcher:
+		return enrichMissNoWatcher
+	default:
+		return enrichMissNoContainer
 	}
 }
 
@@ -88,6 +113,11 @@ type Enricher struct {
 	// enrichmentCache caches enrichment results to reduce cgroup reads
 	mu              sync.RWMutex
 	enrichmentCache map[uint32]*EnrichmentInfo
+	// pidNeg: pids just read as "no container" (волна 9, В4/Н6). Events without
+	// a usable cgroup id (net_close) re-read /proc/<pid>/cgroup on every event
+	// for a host pid because only positive answers were cached. Entries live
+	// pidNegTTL; guarded by mu.
+	pidNeg map[uint32]time.Time
 	// cgroupCache maps the in-kernel cgroup id (types.Event.CgroupID, item 10
 	// wave 6.6) to the attribution of the last pid that resolved in it. A pid
 	// that exited before /proc/<pid>/cgroup was read (MissProcGone, №465) is
@@ -168,6 +198,7 @@ func newEnricherWithWatcher(watcher *Watcher, config EnricherConfig, logger *slo
 		watcher:         watcher,
 		logger:          logger.With("component", "k8s_enricher"),
 		enrichmentCache: make(map[uint32]*EnrichmentInfo),
+		pidNeg:          make(map[uint32]time.Time),
 		cacheTTL:        cacheTTL,
 		resyncPeriod:    resyncPeriod,
 		metrics:         config.Metrics,
@@ -265,6 +296,9 @@ func (e *Enricher) EnrichEvent(event *types.Event) {
 		return
 	}
 
+	if !cruntime.UsableCgroupID(event.CgroupID) {
+		notePidPath(event.Type, event.CgroupID)
+	}
 	info := e.enrichmentInfoFor(event.CgroupID, event.PID)
 	if info == nil {
 		return
@@ -294,6 +328,20 @@ func (e *Enricher) enrichmentInfoFor(cgroupID uint64, pid uint32) *EnrichmentInf
 	return e.getEnrichmentInfo(pid)
 }
 
+// pidNegTTL bounds how long a "no container" answer is trusted for a pid on the
+// pid path; a process moving into a container cgroup right after fork is
+// misattributed for at most this long, and only on events without a cgroup id.
+const pidNegTTL = 2 * time.Second
+
+// notePidPath is the Н6 diagnostic: which events reach the pid path.
+func notePidPath(t types.EventType, cgroupID uint64) {
+	kind := "zero"
+	if cgroupID == 1 {
+		kind = "root"
+	}
+	enrichPidPath.WithLabelValues(strconv.Itoa(int(t)), kind).Inc()
+}
+
 // enrichmentByCgroup resolves pod metadata via the shared cgroup-id resolver.
 // A host process (empty container id) is negative-cached by the resolver, so
 // the no_container case costs two map lookups per event, not a /proc read.
@@ -306,14 +354,14 @@ func (e *Enricher) enrichmentByCgroup(cgroupID uint64, pid uint32) *EnrichmentIn
 	}
 
 	if e.watcher == nil {
-		enrichMissByReason.WithLabelValues(MissNoWatcher).Inc()
+		enrichMissNoWatcher.Inc()
 		e.missCount.Add(1)
 		return nil
 	}
 
 	containerID, cached, err := e.containerResolver().Resolve(cgroupID, pid)
 	if err != nil || containerID == "" {
-		enrichMissByReason.WithLabelValues(missReason(err)).Inc()
+		missCounter(missReason(err)).Inc()
 		e.missCount.Add(1)
 		return nil
 	}
@@ -411,19 +459,34 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 			return info
 		}
 	}
+	negAt, neg := e.pidNeg[pid]
 	e.mu.RUnlock()
+	if neg && time.Since(negAt) < pidNegTTL {
+		enrichMissNoContainer.Inc()
+		e.missCount.Add(1)
+		return nil
+	}
 
 	// Lookup pod info from watcher (nil watcher = enricher not yet started)
 	if e.watcher == nil {
-		enrichMissByReason.WithLabelValues(MissNoWatcher).Inc()
+		enrichMissNoWatcher.Inc()
 		e.missCount.Add(1)
 		return nil
 	}
 
 	containerID, cErr := e.watcher.getContainerIDFromPID(pid)
 	if cErr != nil {
-		enrichMissByReason.WithLabelValues(missReason(cErr)).Inc()
+		reason := missReason(cErr)
+		missCounter(reason).Inc()
 		e.missCount.Add(1)
+		if reason == MissNoContainer {
+			e.mu.Lock()
+			if e.pidNeg == nil {
+				e.pidNeg = make(map[uint32]time.Time)
+			}
+			e.pidNeg[pid] = time.Now()
+			e.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -504,6 +567,11 @@ func (e *Enricher) cleanupCache() {
 	for id, info := range e.cgroupCache {
 		if now.Sub(info.CachedAt) > e.cacheTTL {
 			delete(e.cgroupCache, id)
+		}
+	}
+	for pid, at := range e.pidNeg {
+		if now.Sub(at) > pidNegTTL {
+			delete(e.pidNeg, pid)
 		}
 	}
 	e.mu.Unlock()

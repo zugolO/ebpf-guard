@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -100,12 +101,14 @@ type BaselineLearner struct {
 	learningPeriod time.Duration
 	// Start time of learning
 	startTime time.Time
-	// Whether learning is complete
-	learningComplete bool
+	// Whether learning is complete. Atomic since волна 9 (В8): the learner is shared by
+	// every ingest worker and RecordSample ran under an exclusive mutex on EVERY event
+	// of the learning phase — 15% of worker snapshots sat in that lock at host×8.
+	learningComplete atomic.Bool
 	// Minimum number of samples required
 	minSamples uint64
-	// Current sample count
-	sampleCount uint64
+	// Current sample count (atomic: see learningComplete)
+	sampleCount atomic.Uint64
 }
 
 // NewBaselineLearner creates a new baseline learner.
@@ -119,9 +122,7 @@ func NewBaselineLearner(learningPeriod time.Duration, minSamples uint64) *Baseli
 
 // RecordSample records a new sample during the learning phase.
 func (bl *BaselineLearner) RecordSample() {
-	bl.mu.Lock()
-	defer bl.mu.Unlock()
-	bl.sampleCount++
+	bl.sampleCount.Add(1)
 }
 
 // RecordSamples records n samples at once (wave 8.5 F2: events the kernel
@@ -130,30 +131,24 @@ func (bl *BaselineLearner) RecordSamples(n uint64) {
 	if n == 0 {
 		return
 	}
-	bl.mu.Lock()
-	defer bl.mu.Unlock()
-	bl.sampleCount += n
+	bl.sampleCount.Add(n)
 }
 
 // IsLearningComplete checks if the learning phase is complete.
 func (bl *BaselineLearner) IsLearningComplete() bool {
-	bl.mu.RLock()
-	if bl.learningComplete {
-		bl.mu.RUnlock()
+	if bl.learningComplete.Load() {
 		return true
 	}
+	bl.mu.RLock()
 	elapsed := time.Since(bl.startTime)
-	done := elapsed >= bl.learningPeriod && bl.sampleCount >= bl.minSamples
 	bl.mu.RUnlock()
-	if done {
-		bl.mu.Lock()
-		if !bl.learningComplete {
-			bl.learningComplete = true
+	samples := bl.sampleCount.Load()
+	if elapsed >= bl.learningPeriod && samples >= bl.minSamples {
+		if bl.learningComplete.CompareAndSwap(false, true) {
 			slog.Info("profiler: learning complete",
-				"samples", bl.sampleCount,
+				"samples", samples,
 				"elapsed_seconds", elapsed.Seconds())
 		}
-		bl.mu.Unlock()
 		return true
 	}
 	return false
@@ -161,12 +156,11 @@ func (bl *BaselineLearner) IsLearningComplete() bool {
 
 // LearningProgress returns the progress of learning (0.0 to 1.0).
 func (bl *BaselineLearner) LearningProgress() float64 {
-	bl.mu.RLock()
-	defer bl.mu.RUnlock()
-
-	if bl.learningComplete {
+	if bl.learningComplete.Load() {
 		return 1.0
 	}
+	bl.mu.RLock()
+	defer bl.mu.RUnlock()
 
 	// Progress based on time
 	timeProgress := float64(time.Since(bl.startTime)) / float64(bl.learningPeriod)
@@ -177,7 +171,7 @@ func (bl *BaselineLearner) LearningProgress() float64 {
 	// Progress based on samples
 	var sampleProgress float64
 	if bl.minSamples > 0 {
-		sampleProgress = float64(bl.sampleCount) / float64(bl.minSamples)
+		sampleProgress = float64(bl.sampleCount.Load()) / float64(bl.minSamples)
 		if sampleProgress > 1.0 {
 			sampleProgress = 1.0
 		}
@@ -194,12 +188,11 @@ func (bl *BaselineLearner) LearningProgress() float64 {
 
 // TimeRemaining returns the time remaining in the learning phase.
 func (bl *BaselineLearner) TimeRemaining() time.Duration {
-	bl.mu.RLock()
-	defer bl.mu.RUnlock()
-
-	if bl.learningComplete {
+	if bl.learningComplete.Load() {
 		return 0
 	}
+	bl.mu.RLock()
+	defer bl.mu.RUnlock()
 
 	elapsed := time.Since(bl.startTime)
 	remaining := bl.learningPeriod - elapsed
@@ -214,15 +207,13 @@ func (bl *BaselineLearner) Reset() {
 	bl.mu.Lock()
 	defer bl.mu.Unlock()
 	bl.startTime = time.Now()
-	bl.learningComplete = false
-	bl.sampleCount = 0
+	bl.learningComplete.Store(false)
+	bl.sampleCount.Store(0)
 }
 
 // GetSampleCount returns the current sample count.
 func (bl *BaselineLearner) GetSampleCount() uint64 {
-	bl.mu.RLock()
-	defer bl.mu.RUnlock()
-	return bl.sampleCount
+	return bl.sampleCount.Load()
 }
 
 // BaselineStats holds statistical information about a baseline.

@@ -59,8 +59,20 @@ type Enricher struct {
 	containerMu    sync.RWMutex
 	containerCache map[string]*ContainerInfo
 
+	// pidNeg remembers pids that were just read as "not in a container" so the
+	// pid path does not re-read /proc/<pid>/cgroup for every event of a host pid
+	// (волна 9, заход B, В4/Н6: net_close events carry no cgroup id; their
+	// two reads per event were 4,6% + 5% CPU). Guarded by pidMu; entries live
+	// pidNegTTL, far shorter than the positive cache.
+	pidNeg map[uint32]time.Time
+
 	missCount atomic.Int64
 }
+
+// pidNegTTL bounds how long a "host process" answer is trusted for a pid. A
+// process that moves into a container cgroup right after fork (runc) is
+// misattributed for at most this long, and only on the pid path.
+const pidNegTTL = 2 * time.Second
 
 // NewEnricher creates a new container runtime enricher.
 // Returns an error when Mode is "off" or no runtime is available.
@@ -108,6 +120,7 @@ func newEnricherWithClient(client RuntimeClient, source string, cfg EnricherConf
 		cacheTTL:       cacheTTL,
 		metrics:        cfg.Metrics,
 		pidCache:       make(map[uint32]string),
+		pidNeg:         make(map[uint32]time.Time),
 		containerCache: make(map[string]*ContainerInfo),
 	}
 }
@@ -256,9 +269,13 @@ func (e *Enricher) containerID(cgroupID uint64, pid uint32) (string, error) {
 
 	e.pidMu.RLock()
 	id, ok := e.pidCache[pid]
+	negAt, neg := e.pidNeg[pid]
 	e.pidMu.RUnlock()
 	if ok {
 		return id, nil
+	}
+	if neg && time.Since(negAt) < pidNegTTL {
+		return "", ErrNotContainer
 	}
 
 	id, err := extractContainerID(pid)
@@ -266,6 +283,9 @@ func (e *Enricher) containerID(cgroupID uint64, pid uint32) (string, error) {
 		return "", err
 	}
 	if id == "" {
+		e.pidMu.Lock()
+		e.pidNeg[pid] = time.Now()
+		e.pidMu.Unlock()
 		return "", ErrNotContainer
 	}
 	e.pidMu.Lock()
@@ -301,6 +321,7 @@ func (e *Enricher) cleanupLoop(ctx context.Context) {
 			// PID → container ID mapping has no timestamp; flush on TTL interval.
 			e.pidMu.Lock()
 			e.pidCache = make(map[uint32]string)
+			e.pidNeg = make(map[uint32]time.Time)
 			e.pidMu.Unlock()
 			// Drop expired cgroup-id entries so pod churn cannot grow the shared
 			// resolver's map without bound.

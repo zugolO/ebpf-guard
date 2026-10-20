@@ -77,7 +77,7 @@ func TestDetectorsState_SaveAndLoad_LearningCompletePreserved(t *testing.T) {
 
 	// Force learning to complete without waiting out the real learning period.
 	pool[0].learner.mu.Lock()
-	pool[0].learner.learningComplete = true
+	pool[0].learner.learningComplete.Store(true)
 	pool[0].learner.mu.Unlock()
 	pool[0].learningComplete.Store(true)
 	require.True(t, pool[0].IsLearningComplete())
@@ -116,7 +116,7 @@ func TestSaveDetectorsState_NoDetectorsDoesNotTruncate(t *testing.T) {
 	// A previous run, with the profiler enabled, persisted completed learning.
 	seeded := []*AnomalyDetector{NewAnomalyDetector(0.7, learningPeriod, 0.3)}
 	seeded[0].learner.mu.Lock()
-	seeded[0].learner.learningComplete = true
+	seeded[0].learner.learningComplete.Store(true)
 	seeded[0].learner.mu.Unlock()
 	seeded[0].learningComplete.Store(true)
 	require.NoError(t, SaveDetectorsState(seeded, path))

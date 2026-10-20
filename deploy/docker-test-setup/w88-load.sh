@@ -31,6 +31,11 @@ ATTACK_RATE=${ATTACK_RATE:-5000}
 GEN_PROCS=${GEN_PROCS:-1}
 PROBE=${PROBE:-0}; PROBE_RATE=${PROBE_RATE:-1000}; CONTROLS=${CONTROLS:-0}; CTL_RATE=${CTL_RATE:-50}
 CPU_LIMIT=${CPU_LIMIT:-}; BULK_MIX=${BULK_MIX:-$MIX}
+# Волна 9, заход B: сборка замеров выбрана явно, а не случайным флагом (plan.md «Волна 9 — заход B»):
+#   под — core (как в поставке: без тега rego, policy.rego.enabled=false); хост — full ($SRC/build/ebpf-guard = make build,
+#   -tags rego) с policy.rego.enabled=true, как будет ночью. Оба плеча A/B одной сборкой. Рантайм-флаги rego_built/
+#   rego_active сверяются с намерением ниже (die при расхождении), печатаются в driver.log и $OUT/build.txt.
+POD_TAGS=${POD_TAGS-}; HOST_REGO=${HOST_REGO:-1}; export HOST_REGO
 HERE=$(cd "$(dirname "$0")" && pwd)
 SERVICE=ebpf-guard-test.service
 NS=ebpf-guard; REL=e88; POD_TOKEN=w88podtoken0123456789abcdef01234567; POD_STATE=/var/lib/ebpf-guard-pod
@@ -46,7 +51,9 @@ n_agents() { ps -eo cmd | grep -cE '^(/usr/local/bin/|[^ ]*/build/)ebpf-guard --
 GEN_PIDS=""; POD_UP=0; SA_UP=0
 SOMAXCONN_OLD=$(sysctl -n net.core.somaxconn 2> /dev/null)
 TWREUSE_OLD=$(sysctl -n net.ipv4.tcp_tw_reuse 2> /dev/null)
+BPFSTATS_OLD=$(sysctl -n kernel.bpf_stats_enabled 2> /dev/null)
 cleanup() {
+    [ "${BPFSTATS:-0}" = 1 ] && [ -n "$BPFSTATS_OLD" ] && sysctl -qw kernel.bpf_stats_enabled="$BPFSTATS_OLD" 2> /dev/null
     [ -n "$SOMAXCONN_OLD" ] && sysctl -qw net.core.somaxconn="$SOMAXCONN_OLD" 2> /dev/null
     [ -n "$TWREUSE_OLD" ] && sysctl -qw net.ipv4.tcp_tw_reuse="$TWREUSE_OLD" 2> /dev/null
     [ -n "$GEN_PIDS" ] && kill $GEN_PIDS 2> /dev/null
@@ -54,6 +61,9 @@ cleanup() {
     [ -n "${POLL_PID:-}" ] && kill "$POLL_PID" 2> /dev/null
     [ "$SA_UP" = 1 ] && sa_stop
     if [ "$POD_UP" = 1 ]; then
+        # Волна 9, заход B: причина рестарта пода на max (OOMKilled? паника?) — до удаления релиза
+        kubectl -n "$NS" describe pod > "$OUT/pod-describe.txt" 2>&1
+        kubectl -n "$NS" logs "ds/$REL-ebpf-guard" --previous --tail=200 > "$OUT/pod-previous.log" 2>&1
         helm uninstall "$REL" -n "$NS" > /dev/null 2>&1
         local k; for k in $(seq 1 60); do [ "$(n_agents)" -eq 0 ] && break; sleep 2; done
     fi
@@ -73,6 +83,8 @@ GEN="$SRC/build/e6load"
 # TIME_WAIT клиентских сокетов loopback исчерпывал эфемерные порты на ступенях 45 000+ оп/с (connect ≈ 4% операций);
 # tcp_tw_reuse=1 на время смока, восстанавливается в cleanup.
 sysctl -qw net.ipv4.tcp_tw_reuse=1 2> /dev/null
+# Волна 9, заход B: BPFSTATS=1 — kernel.bpf_stats_enabled=1 и снимок bpftool prog show -j в каждом срезе (цена зондов в ядре по ступеням)
+[ "${BPFSTATS:-0}" = 1 ] && sysctl -qw kernel.bpf_stats_enabled=1
 sysctl -qw net.core.somaxconn=65535 || say "somaxconn не поднят: backlog слушателя урезан ядром"
 mkdir -p /srv/e6/bin
 cp "$GEN" /srv/e6/bin/w88p
@@ -87,14 +99,14 @@ for k in $(seq 1 30); do [ "$(n_agents)" -eq 0 ] && break; sleep 1; done
 say "рабочий остановлен"
 
 if [ "$ROLE" = host ]; then
-    SA_UNIT= SA_CFG_PATCH="$HERE/w87-e1-patch.py" sa_start "$SRC" /root/w88-run 19281 || die "второй агент не поднялся"
+    SA_ENV="${AGENT_ENV:-}" SA_UNIT= SA_CFG_PATCH="$HERE/w87-e1-patch.py" sa_start "$SRC" /root/w88-run 19281 || die "второй агент не поднялся"
     SA_UP=1; APID=$SA_PID; API=$SA_API; TOKEN=$SA_TOKEN
 else
     [ "$(kubectl get node -o jsonpath='{.items[0].status.conditions[?(@.type=="DiskPressure")].status}')" = False ] || die "узел в DiskPressure"
     helm status "$REL" -n "$NS" > /dev/null 2>&1 && die "релиз $REL уже стоит"
     kubectl get ns "$NS" > /dev/null 2>&1 || kubectl create namespace "$NS" > /dev/null || die "namespace"
     B="$OUT/pod-image"; mkdir -p "$B"
-    ( cd "$SRC" && CGO_ENABLED=0 go build -tags rego -trimpath -o "$B/ebpf-guard" ./cmd/ebpf-guard ) > "$OUT/pod-build.log" 2>&1 || die "сборка бинаря пода"
+    ( cd "$SRC" && CGO_ENABLED=0 go build ${POD_TAGS:+-tags $POD_TAGS} -trimpath -o "$B/ebpf-guard" ./cmd/ebpf-guard ) > "$OUT/pod-build.log" 2>&1 || die "сборка бинаря пода"
     TAG="w88-$(sha256sum "$B/ebpf-guard" | cut -c1-12)"; echo "$TAG" > "$OUT/pod-tag"
     printf 'FROM gcr.io/distroless/static:debug\nCOPY ebpf-guard /usr/local/bin/ebpf-guard\nENV GOMEMLIMIT=off\nENTRYPOINT ["/usr/local/bin/ebpf-guard"]\n' > "$B/Dockerfile"
     docker build -q -t "zugolo/ebpf-guard:$TAG" "$B" > "$OUT/pod-image.log" 2>&1 || die "docker build"
@@ -133,6 +145,10 @@ echo "$APID" > "$OUT/agent-pid"
 [ "$(n_agents)" -eq 1 ] || die "после старта ожидался ровно один агент (смоковый), есть $(n_agents)"
 m() { curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/metrics"; }
 flag() { m | awk -v f="$1" '$0 ~ "^ebpf_guard_runtime_flag\\{flag=\"" f "\"\\}" { print $NF }'; }
+if [ "$ROLE" = host ]; then want_built=1; want_active=$HOST_REGO; else want_built=$([ -n "$POD_TAGS" ] && echo 1 || echo 0); want_active=$want_built; fi
+printf 'role=%s rego_built=%s rego_active=%s (ждали built=%s active=%s) pod_tags=%s\n' "$ROLE" "$(flag rego_built)" "$(flag rego_active)" "$want_built" "$want_active" "$POD_TAGS" > "$OUT/build.txt"
+say "сборка: $(cat "$OUT/build.txt")"
+[ "$(flag rego_built)" = "$want_built" ] && [ "$(flag rego_active)" = "$want_active" ] || die "сборка/Rego не те: $(cat "$OUT/build.txt")"
 [ "$(flag pprof_stage_labels)" = 1 ] || die "pprof_stage_labels не 1 по рантайму"
 [ "$(flag enable_pprof)" = 1 ] || die "enable_pprof не 1 по рантайму"
 pst=$(m | awk '/^ebpf_guard_kernel_predicate_state\{/ && $NF == 1' | sed 's/.*state="\([^"]*\)".*/\1/')
@@ -148,6 +164,10 @@ snap() { # snap <каталог> <метка>
     awk '{ print $14 + $15 }' "/proc/$APID/stat" > "$d/$t.ticks" 2> /dev/null
     awk '/^VmRSS/ { print $2 }' "/proc/$APID/status" > "$d/$t.rss" 2> /dev/null
     head -1 /proc/stat > "$d/$t.cpu"
+    # Волна 9, заход B: сумма по потокам агента «CPU ns / ожидание в очереди запуска ns / число квантов» — run_delay
+    # отделяет «поток ждёт ядро» от «поток ждёт блокировку/канал».
+    [ "${BPFSTATS:-0}" = 1 ] && bpftool prog show -j > "$d/$t.bpfprogs" 2> /dev/null
+    cat /proc/$APID/task/*/schedstat 2> /dev/null | awk '{ c += $1; r += $2; n += $3 } END { print c, r, n }' > "$d/$t.sched"
 }
 gen() { # gen <rate|max> <dur_s> <json> — GEN_PROCS процессов, итог каждого в <json>.<p>
     local r=$1 p; [ "$r" = max ] && r=0
@@ -178,6 +198,17 @@ diag_collect() {
     curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/block" > "$d/block.pprof"
     curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/mutex" > "$d/mutex.pprof"
     curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/goroutine?debug=1" > "$d/goroutine.txt"
+}
+
+# ── Волна 9, заход B: GOSNAP=1 — моментальные снимки стеков горутин (goroutine?debug=2) раз в 0,5 с в середине ступени.
+#   Время внутри handle() воркера (busy_seconds) в 2–3 раза превышало CPU агента: по снимкам видно, где воркер ждёт.
+gosnap_step() { # gosnap_step <каталог ступени> — в фоне, начало ступени
+    local d=$1 k
+    sleep 20
+    for k in $(seq 1 40); do
+        curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/goroutine?debug=2" > "$d/gor-$k.txt"
+        sleep 0.5
+    done
 }
 
 # ── 8.8: приборы Р0 ───────────────────────────────────────────────────────────────────────────────────────────
@@ -223,6 +254,7 @@ if [ "$MODE" = steps ]; then
         CUR_STEP=$s
         aux_start "$STEP_S" "$D"
         if [ "$DIAG" = 1 ]; then diag_step "$D" & DIAG_PID=$!; fi
+        if [ "${GOSNAP:-0}" = 1 ]; then gosnap_step "$D" & GOSNAP_PID=$!; fi
         [ "$s" != 0 ] && gen "$s" "$STEP_S" "$D/gen.json"
         # 8.8: CPU-профиль 30 с жёг CPU агента внутри ступени и сам взводил сторож CPU пода (уровень 2 на ступени 0), поэтому
         # по умолчанию выключен; PROFILE=1 возвращает его для разрезов по стадиям.
@@ -235,6 +267,7 @@ if [ "$MODE" = steps ]; then
         [ -n "$AUX_PIDS" ] && wait $AUX_PIDS; AUX_PIDS=""
         date +%s.%N > "$D/step-end.t"
         if [ "$DIAG" = 1 ]; then wait "${DIAG_PID:-}" 2> /dev/null; diag_collect "$D"; fi
+        [ "${GOSNAP:-0}" = 1 ] && wait "${GOSNAP_PID:-}" 2> /dev/null
         snap "$D" b
         [ -n "$PROF" ] && wait "$PROF"
         sleep "$GAP_S"

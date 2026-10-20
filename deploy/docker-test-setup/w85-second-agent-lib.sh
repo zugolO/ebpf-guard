@@ -60,7 +60,7 @@ PY
         SA_PID=$(systemctl show -p MainPID --value "$SA_UNIT"); echo "$SA_PID" > "$RUN/pid"
         SA_CG=/sys/fs/cgroup$(awk -F: '$1 == "0" { print $3 }' /proc/$SA_PID/cgroup 2> /dev/null | head -1)
     else
-        (cd "$RUN"; nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
+        (cd "$RUN"; nohup env ${SA_ENV:-} "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
         SA_PID=$(cat "$RUN/pid")
     fi
     local i

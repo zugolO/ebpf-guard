@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,7 +105,8 @@ type worker struct {
 	errs   [nOps]uint64
 	// connectErrno — разбивка ошибок connect по errno (волна 8.8, Р0(а)): чем именно
 	// генератор упёрся (EADDRNOTAVAIL — порты, EAGAIN/ETIMEDOUT — backlog).
-	connectErrno map[string]uint64
+	connectErrno    map[string]uint64
+	connectInProgress uint64
 }
 
 func (w *worker) do(op int) {
@@ -134,26 +136,25 @@ func (w *worker) do(op int) {
 		}
 	case opConnect:
 		var fd int
-		fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+		// Волна 9, заход B (8.8.Д(а), история лестницы): блокирующий connect с SO_SNDTIMEO=200 мс терял по ~255
+		// таймаутов на процесс (≈ 25 с из 60 на воркер) на ступенях ПОСЛЕ первой — холодная ступень 60 000 шла без
+		// единого таймаута и подавала 60 000 оп/с против 38 000 в лестнице; «обвал» ×8 наполовину был замедлением
+		// самого генератора. Сокет теперь неблокирующий: connect возвращает EINPROGRESS сразу (SYN ушёл, tcp_connect
+		// сработал — это и видит агент), сокет закрывается без ожидания рукопожатия. Воркер не стоит.
+		fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0)
 		if err == nil {
-			// Волна 8.8, Р0(а): блокирующий connect на переполненный backlog слушателя
-			// ждал повтора SYN (ступень 60 000 шла 79,5 с вместо 60 в Е6) — это артефакт
-			// генератора, не агента. SO_SNDTIMEO обрывает ожидание, ошибка считается.
-			tv := syscall.NsecToTimeval(int64(200 * time.Millisecond))
-			_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
-			// EINTR — сигнал планировщика Go (SIGURG) прервал блокирующий connect: это не отказ
-			// сервера, а артефакт рантайма генератора (стенд, 22:39: 51 ошибка «interrupted system call»).
 			sa := &syscall.SockaddrInet4{Port: w.port, Addr: [4]byte{127, 0, 0, 1}}
-			for try := 0; try < 4; try++ {
-				err = syscall.Connect(fd, sa)
-				if err != syscall.EINTR {
-					break
-				}
-			}
+			err = syscall.Connect(fd, sa)
 			syscall.Close(fd)
 		}
 	case opExec:
 		err = exec.Command("/bin/true").Run()
+	}
+	// Волна 9, заход B: таймаут connect (EINPROGRESS после SO_SNDTIMEO) — SYN уже ушёл, а tcp_connect, который
+	// видит агент, сработал; операция подана. Считается отдельно (connect_inprogress), не ошибкой и не потерей темпа.
+	if op == opConnect && (err == syscall.EINPROGRESS || err == syscall.EALREADY) {
+		w.connectInProgress++
+		err = nil
 	}
 	if err != nil {
 		w.errs[op]++
@@ -241,8 +242,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer ln.Close()
+	// Волна 9, заход B (8.8.Д(а) ×8): 8 процессов генератора + агент занимают все 4 ядра; accept-горутины
+	// без CPU не опустошали очередь слушателя, SYN терялся, блокирующий connect ждал SO_SNDTIMEO (~245 ошибок
+	// на процесс, elapsed 65 с). Потоки accept получают nice -10 (не root — setpriority молча не сработает).
 	for a := 0; a < 8; a++ {
 		go func() {
+			runtime.LockOSThread()
+			_ = syscall.Setpriority(syscall.PRIO_PROCESS, syscall.Gettid(), -10)
 			for {
 				c, err := ln.Accept()
 				if err != nil {
@@ -339,6 +345,9 @@ func main() {
 					}
 				}
 				for k := 0; k < int(due); k++ {
+					if k&63 == 63 && (stop.Load() || time.Now().After(deadline)) {
+						break // 8.8.Д(а): пачка в 4096 операций с таймаутами тянула elapsed за срок
+					}
 					op := seq[si%len(seq)]
 					si++
 					if op == opExec {
@@ -379,6 +388,11 @@ func main() {
 		}
 	}
 	out["connect_errno"] = cerr
+	var cto uint64
+	for _, w := range ws {
+		cto += w.connectInProgress
+	}
+	out["connect_inprogress"] = cto
 	out["ops_total"] = total
 	out["ops_per_s"] = float64(total) / elapsed
 	// CPU самого генератора (и детей exec отдельно): на 4 ядрах стенда он делит машину с агентом.

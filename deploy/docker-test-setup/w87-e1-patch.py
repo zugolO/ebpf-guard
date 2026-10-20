@@ -15,5 +15,8 @@ import os
 rego = os.path.join(sys.argv[2], "rules", "rego")
 assert os.path.isdir(rego), "нет каталога политик " + rego
 c.setdefault("policy", {}).setdefault("rego", {})["rules_dir"] = rego
+# Волна 9: умолчание Rego — off (Д15); хост-замеры идут на full и включают слой явно (HOST_REGO=1, как ночь).
+if os.environ.get("HOST_REGO") == "1":
+    c["policy"]["rego"]["enabled"] = True
 yaml.safe_dump(c, open(cfg, "w"), allow_unicode=True, sort_keys=False)
 print("pprof_stage_labels = true; policy.rego.rules_dir =", rego)

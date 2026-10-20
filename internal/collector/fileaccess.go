@@ -26,6 +26,7 @@ type FileaccessCollector struct {
 	status      StatusReporter
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
+	heavy       pidHeavyTracker // волна 9, В8: доминирующие pid читателя (readLoop — единственный писатель)
 
 	ringbufNetpoll bool // wave 8.1 item 6: netpoll wait path instead of blocking epoll_wait
 	drainWindow    time.Duration // wave 8.7 П2: окно слива кольца (0 — выключено)
@@ -669,7 +670,7 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 			continue
 		}
 
-		sendEvent(ctx, out, *event, c.strategy, func() {
+		dropFn := func() {
 			exporter.RecordEventDrop("fileaccess", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(c.logger, "ringbuf_to_router")
 			// plan.md 5.9.8b (№91): a canary event dropped here never
@@ -680,9 +681,44 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 			if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.Path()) {
 				exporter.RecordCountingCanary("dropped")
 			}
-		})
+		}
+		// Волна 9, заход B (8.8.4): when the hand-off channel is full the surplus of the pids
+		// that dominate the stream is dropped at once, and a light pid's event waits a moment
+		// for a slot instead — before, every pid lost the same share here (pod, 45 000 ops/s:
+		// ringbuf_to_router 9 409 events, the 8 control processes lost 31 of 9 409 ≈ their share).
+		if c.strategy == StrategyDrop {
+			c.heavy.note(event.PID)
+			c.sendFileEvent(ctx, out, *event, dropFn)
+		} else {
+			sendEvent(ctx, out, *event, c.strategy, dropFn)
+		}
 		event.Reset()
 		eventPool.Put(event)
+	}
+}
+
+// lightPidHandoffWait bounds how long the ring reader waits for a free hand-off slot for an
+// event of a pid that is not heavy.
+const lightPidHandoffWait = 5 * time.Millisecond
+
+// sendFileEvent is sendEvent(StrategyDrop) with a pid-aware full-channel branch.
+func (c *FileaccessCollector) sendFileEvent(ctx context.Context, out chan<- types.Event, e types.Event, dropped func()) {
+	select {
+	case out <- e:
+		return
+	default:
+	}
+	if c.heavy.isHeavy(e.PID) {
+		dropped()
+		return
+	}
+	timer := time.NewTimer(lightPidHandoffWait)
+	defer timer.Stop()
+	select {
+	case out <- e:
+	case <-ctx.Done():
+	case <-timer.C:
+		dropped()
 	}
 }
 

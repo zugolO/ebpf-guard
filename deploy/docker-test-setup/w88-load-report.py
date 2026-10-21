@@ -40,6 +40,7 @@ CTL_WINDOW_NEAR = (1.5, 2.5)  # 8.8.4: ступень, ближайшая к 2×
 NODE_IDLE_MIN = 0.10        # простой ноды < 10% (4 ядра заняты) — ступень на стенде не судится (НЕИЗМЕРИМ), а не FAIL
 PROBE_P99_MAX = 0.1
 PLATEAU_MIN = 0.9
+PRICE_RISE_MAX = 1.1        # 8.8.2(ц), предложение захода C волны 9: мкс/соб. на ступени за потолком ≤ 1,1 × на ступени первых потерь
 DEGRADE_DELAY_MAX = 10.0
 
 
@@ -192,6 +193,7 @@ def main():
     def sat_note(i):
         return f"{st[i]['name']}: простой ноды {ns[i]['idle']:.1%}, агент {ns[i]['agent'] or 0:.2f}, генератор {ns[i]['gen']:.2f} ядра"
     lines = []
+    gen_procs = max((len([f for f in glob.glob(f"{s['dir']}/gen.json.*") if not f.endswith(".err")]) for s in st), default=0)
 
     # cap — ёмкость без потерь: наибольшая «обработано» среди ступеней с потерями < 0,1%; peak — наибольшая «обработано»
     # по всей лестнице (потолок): плато = за потолком обработка не падает ниже 0,9 потолка (Е6: под 5 100/17 200 = 0,30).
@@ -208,6 +210,7 @@ def main():
         frac = lost / (lost + n["proc_s"] * n["dt"]) if (lost + n["proc_s"] * n["dt"]) > 0 else 0.0
         n["loss_frac"] = frac     # потери = дропы + сброс сэмплером в ядре: и то и другое — объём, которого агент не увидел
         dfrac = n["drops"] / (n["drops"] + n["proc_s"] * n["dt"]) if (n["drops"] + n["proc_s"] * n["dt"]) > 0 else 0.0
+        n["dfrac"] = dfrac
         if dfrac < CLEAN_STEP_FRAC and n["proc_s"] > cap_d:
             cap_d, cap_ops_d = n["proc_s"], n["ops_s"]
         if frac < CLEAN_STEP_FRAC and n["proc_s"] > cap:
@@ -287,10 +290,31 @@ def main():
                                  "; ".join(sat_note(i) for i, _, r in sat_r if r < PLATEAU_MIN)))
         else:
             lines.append(verdict("8.8.2", role, True, detail))
+    # 8.8.2(ц) — предложение захода C волны 9 (печатается всегда, чтобы ночь судилась при любом решении): ×8 на 4 vCPU стенда
+    # отношение «обработано» шумит 0,75…1,13 на любом бинаре — на 60 000 генератор берёт 1,6–1,8 ядра и агент теряет 3–14% CPU
+    # при простое ноды 10–21%. Цена события (ядра агента / обработано) от этого почти не зависит: судится она.
+    if first_loss is None:
+        lines.append(verdict("8.8.2(ц)", role, None, "нет ступени с потерями ≥ 1% (потолок не достигнут)"))
+    else:
+        def price(i):
+            return (ns[i]["agent"] / nums[i]["proc_s"] * 1e6) if ns[i] and ns[i]["agent"] and nums[i] and nums[i]["proc_s"] > 0 else None
+        p0 = price(first_loss)
+        rows_p = [(i, price(i)) for i in range(first_loss + 1, len(nums)) if nums[i]]
+        if not rows_p:
+            lines.append(verdict("8.8.2(ц)", role, None, f"за ступенью первых потерь {st[first_loss]['name']} ступеней нет — сравнивать не с чем"))
+        elif p0 is None or any(p is None for _, p in rows_p):
+            lines.append(verdict("8.8.2(ц)", role, None, "нет ядер агента или обработки на ступенях за первой потерей"))
+        else:
+            judged_p = [(i, p) for i, p in rows_p if not saturated(i)]
+            badp = [f"{st[i]['name']}: {p:.1f} мкс ({p / p0:.2f}×)" for i, p in judged_p if p > PRICE_RISE_MAX * p0]
+            det = (f"мкс/соб. на ступени первых потерь {st[first_loss]['name']}: {p0:.1f}; дальше: " +
+                   ", ".join(f"{st[i]['name']}={p:.1f} ({p / p0:.2f}×)" + ("*" if saturated(i) else "") for i, p in rows_p) +
+                   f"; порог {PRICE_RISE_MAX}×" + ("; * — простой ноды < 10%, не судится" if any(saturated(i) for i, _ in rows_p) else ""))
+            lines.append(verdict("8.8.2(ц)", role, (not badp) if judged_p else None, det + (f"; нарушения: {'; '.join(badp)}" if badp else "")))
 
     # ── 8.8.3 / 8.8.4 ────────────────────────────────────────────────────────────────────────────────────────
-    def ratios(kind):
-        """r0 (событий на подан. операцию) калибруется на ступени 0 и на нижних; возвращает {имя: r0}."""
+    def ratios_first(kind):
+        """r0 до волны 9 (справочно): событий на подан. операцию по ПЕРВОЙ ступени с потерями < 1%; {имя: r0}."""
         r0 = {}
         for i, s in enumerate(st):
             n = nums[i]
@@ -301,6 +325,29 @@ def main():
                 if sent > 0 and name not in r0:
                     r0[name] = seen / sent
         return r0
+
+    def ratios(kind):
+        """r0 — ПОЛ «увидено/подано» по калибровочным ступеням (волна 9, заход C). Счёт процесса на ступени квантуется шагом
+        2 (один вызов рантайма Go = enter+exit; хост 4658/4660/4662, под 4659/4661/4663 при одних и тех же 2999 оп.) на любой
+        ступени, и первая ступень как эталон давала «потерю 2» без потери. Калибровка — ступени без единого реального дропа
+        (запасной вариант — дропы < 0,1%, называется); контрольные — одинаковые процессы: пол общий по всем. {имя: r0}, класс."""
+        cal = [i for i, n in enumerate(nums) if n and n["drops"] == 0]
+        cls = "ступеням без реальных дропов"
+        if not cal:
+            cal = [i for i, n in enumerate(nums) if n and n.get("dfrac", 1.0) < CLEAN_STEP_FRAC]
+            cls = "ступеням с дропами < 0,1% (ступеней без дропов нет)"
+        per = {}
+        for i in cal:
+            n = nums[i]
+            for name, sent in sent_ops(st[i], kind).items():
+                if sent > 0:
+                    per.setdefault(name, []).append((probe_seen(n["c"], name) - probe_seen(n["a"], name)) / sent)
+        if not per:
+            return {}, cls, []
+        if kind == "controls":
+            floor = min(min(v) for v in per.values())
+            return {name: floor for name in per}, cls, [st[i]["name"] for i in cal]
+        return {name: min(v) for name, v in per.items()}, cls, [st[i]["name"] for i in cal]
 
     def sent_ops(s, kind):
         d = s["dir"]
@@ -327,11 +374,14 @@ def main():
                 ctl_step = None
 
     for label, kind in (("8.8.3", "probe"), ("8.8.4", "controls")):
-        r0 = ratios(kind)
+        r0, cal_cls, cal_names = ratios(kind)
+        r0_old = ratios_first(kind)
         if not r0:
             lines.append(verdict(label, role, None, "нет ни одной калибровочной ступени с зондом/контролями (PROBE=1 / CONTROLS=N)"))
+            if label == "8.8.4":
+                lines.append(verdict("8.8.4(0)", role, None, "нет ни одной калибровочной ступени с контролями (CONTROLS=N)"))
             continue
-        bad, judged, worst, worst_ev, sat_skip, ev_bad = [], 0, 0.0, 0.0, [], []
+        bad, judged, worst, worst_ev, sat_skip, ev_bad, old_ev, bad_p99 = [], 0, 0.0, 0.0, [], [], 0.0, []
         for i, s in enumerate(st):
             n = nums[i]
             if label == "8.8.3":
@@ -353,6 +403,8 @@ def main():
                 judged += 1
                 worst = max(worst, loss)
                 worst_ev = max(worst_ev, exp - seen)
+                if name in r0_old:
+                    old_ev = max(old_ev, sent * r0_old[name] - seen)
                 p99 = hist_q(n["a"], n["b"], name, 0.99) if kind == "probe" else None
                 if label == "8.8.3" and exp - seen >= PROBE_LOSS_MAX_EVENTS:
                     bad.append(f"{s['name']}/{name}: потеряно {exp - seen:.0f} соб. ({loss:.2%})")
@@ -361,23 +413,36 @@ def main():
                 if label == "8.8.4" and exp - seen >= CTL_LOSS_MAX_EVENTS:
                     ev_bad.append(f"{s['name']}/{name}: {exp - seen:.0f}")
                 if kind == "probe" and (p99 is None or p99 > PROBE_P99_MAX):
+                    bad_p99.append(1)
                     bad.append(f"{s['name']}/{name}: p99 возраста {'—' if p99 is None else f'{p99 * 1000:g} мс'} > {PROBE_P99_MAX * 1000:g}")
+        cal_note = (f"пол «увидено/подано» по {cal_cls}: {','.join(cal_names)}" + (" (общий для всех контрольных)" if kind == "controls" else "") +
+                    f"; справочно по первой чистой ступени (до захода C): худшая {max(old_ev, 0.0):.0f} соб.")
         if label == "8.8.3":
             ref = f"; справочно по прежнему порогу {PROBE_LOSS_REF:.1%}: " + ("PASS" if worst <= PROBE_LOSS_REF else "FAIL")
             lines.append(verdict(label, role, (not bad) if judged else None,
-                                 (f"судимо {judged} пар (ступень×процесс; подача в (ёмкость, 2×ёмкость] = ({cap_ops_d:,.0f}, {PROBE_WINDOW_MAX * cap_ops_d:,.0f}] оп/с; ёмкость по реальным дропам), худшая потеря {worst:.2%} ({worst_ev:.1f} соб.), порог плана — 0 событий{ref}" if judged else "нет ступеней с подачей в (ёмкость, 2×ёмкость]") +
+                                 (f"судимо {judged} пар (ступень×процесс; подача в (ёмкость, 2×ёмкость] = ({cap_ops_d:,.0f}, {PROBE_WINDOW_MAX * cap_ops_d:,.0f}] оп/с; ёмкость по реальным дропам), худшая потеря {worst:.2%} ({max(worst_ev, 0.0):.1f} соб.), порог плана — 0 событий{ref}; {cal_note}" if judged else "нет ступеней с подачей в (ёмкость, 2×ёмкость]") +
                                  (f"; нарушения: {'; '.join(bad)}" if bad else "")))
+            # 8.8.3(а) — предложение захода C волны 9 (печатается всегда): под ×N генераторов зонд стоит в protected-FIFO
+            # event_high за prctl/connect/exec горячих pid — p99 = глубина очереди / темп protected (хост 65 536 / ≈30 тыс./с ≈
+            # 2,2 с, под 7 736 → 250 мс); p99 судится только для ×1, потери — всегда.
+            multi = gen_procs > 1
+            ok_a = (len(bad) - len(bad_p99) == 0) if multi else (not bad)
+            lines.append(verdict("8.8.3(а)", role, ok_a if judged else None,
+                                 (f"генераторов {gen_procs}: " + ("p99 возраста не судится (×N), только потери" if multi else "×1 — как 8.8.3, p99 судится")) +
+                                 f"; худшая потеря {max(worst_ev, 0.0):.1f} соб." + (f"; нарушений p99 {len(bad_p99)} (справочно)" if multi and bad_p99 else "")))
             continue
         if ctl_step is None:
-            lines.append(verdict(label, role, None, "нет ступени с подачей в [1,5; 2,5]× ёмкости по реальным дропам" +
-                                 (f" ({cap_ops_d:,.0f} оп/с)" if cap_ops_d else "")))
+            why = "нет ступени с подачей в [1,5; 2,5]× ёмкости по реальным дропам" + (f" ({cap_ops_d:,.0f} оп/с)" if cap_ops_d else "")
+            lines.append(verdict(label, role, None, why))
+            lines.append(verdict("8.8.4(0)", role, None, why))
             continue
         where = (f"ступень {st[ctl_step]['name']} ({nums[ctl_step]['ops_s']:,.0f} оп/с = {nums[ctl_step]['ops_s'] / cap_ops_d:.2f}× ёмкости {cap_ops_d:,.0f})")
         if sat_skip:
-            lines.append(verdict(label, role, None, f"{where}: ящик занят целиком, ступень не судится; {sat_skip[0]} (порог простоя {NODE_IDLE_MIN:.0%})"))
+            why = f"{where}: ящик занят целиком, ступень не судится; {sat_skip[0]} (порог простоя {NODE_IDLE_MIN:.0%})"
+            lines.append(verdict(label, role, None, why))
+            lines.append(verdict("8.8.4(0)", role, None, why))
             continue
-        ref_note = (f"справочно: порог «0 событий» — " + ("PASS" if not ev_bad else f"FAIL ({', '.join(ev_bad)})") +
-                    f", прежний {CTL_LOSS_REF:.1%} — " + ("PASS" if worst <= CTL_LOSS_REF else "FAIL"))
+        ref_note = f"справочно: прежний {CTL_LOSS_REF:.1%} — " + ("PASS" if worst <= CTL_LOSS_REF else "FAIL")
         n = nums[ctl_step]
         light = {}
         for hop in ("ringbuf_to_router", "router_to_queue", "worker_full"):
@@ -387,8 +452,13 @@ def main():
         hop_note = ("потери лёгких pid по хопам за ступень: " + ", ".join(f"{h} {v:.0f}" for h, v in light.items())) if light \
             else "серии ebpf_guard_events_dropped_by_pid_class_total нет (бинарь до волны 9)"
         lines.append(verdict(label, role, (not bad) if judged else None,
-                             f"{where}; судимо {judged} контрольных; худшая потеря {worst:.2%} ({worst_ev:.1f} соб.), порог {CTL_LOSS_MAX_FRAC:.1%}; {hop_note}; {ref_note}" +
+                             f"{where}; судимо {judged} контрольных; худшая потеря {worst:.2%} ({max(worst_ev, 0.0):.1f} соб.), порог {CTL_LOSS_MAX_FRAC:.1%}; {hop_note}; {cal_note}; {ref_note}" +
                              (f"; нарушения: {'; '.join(bad)}" if bad else "")))
+        # 8.8.4(0) — тот же вход, порог «0 событий» к полу (предложение захода C владельцу): печатается всегда, чтобы ночь
+        # судилась при любом решении о пороге.
+        lines.append(verdict("8.8.4(0)", role, (not ev_bad) if judged else None,
+                             f"{where}; порог «0 событий» к полу калибровки; худший недосчёт {max(worst_ev, 0.0):.0f} соб." +
+                             (f"; нарушения: {', '.join(ev_bad)}" if ev_bad else "")))
 
     # ── 8.8.5 ────────────────────────────────────────────────────────────────────────────────────────────────
     if role != "pod":

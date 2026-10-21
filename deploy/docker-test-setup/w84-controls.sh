@@ -54,7 +54,10 @@ scenario() {
     echo "$expect" > "$D/expect"; echo "$note" > "$D/note"
     bpftrace "$HERE/w84-chain-witness.bt" > "$D/witness.txt" 2>&1 &
     local BT=$!
-    sleep 3
+    # «Attaching N probe» bpftrace печатает после компиляции (холодный первый сценарий — разбор BTF дольше 3 с: репетиция
+    # ночи 9 — 0 systemctl у dpkg -r при живом prerm); ждём строку, затем 2 с на подключение пробы
+    local k; for k in $(seq 1 60); do grep -q '^Attaching' "$D/witness.txt" 2> /dev/null && break; sleep 0.5; done
+    sleep 2
     M > "$D/m0.txt"; local t0; t0=$(date +%s); echo "$t0" > "$D/t0"
     ( "$@" ) > "$D/cmd.log" 2>&1; echo "rc=$?" >> "$D/cmd.log"
     sleep "$WIN"

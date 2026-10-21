@@ -11,7 +11,8 @@ export PATH=$PATH:/usr/local/go/bin
 rm -rf "$OUT"; mkdir -p "$OUT"; exec > "$OUT/driver.log" 2>&1
 trap 'sa_stop 2> /dev/null; echo "агентов после: $(ps -eo cmd | grep -c "[e]bpf-guard --config")"' EXIT
 die() { echo "die: $*" > "$OUT/DONE"; echo "DIE: $*"; exit 1; }
-[ "$(ps -eo cmd | grep -c '[e]bpf-guard --config')" -eq 1 ] || die "ожидался ровно один (рабочий) агент до запуска"
+# Волна 9, ночь: рабочий агент остановлен пайплайном на время пары (ровно один агент на машине) — EXPECT_AGENTS=0.
+[ "$(ps -eo cmd | grep -c '[e]bpf-guard --config')" -eq "${EXPECT_AGENTS:-1}" ] || die "ожидалось агентов до запуска: ${EXPECT_AGENTS:-1}"
 mval() { sa_metrics | grep -a "^$1 " | awk '{print $2}'; }
 evsum() { sa_metrics | grep -a '^ebpf_guard_events_total' | awk '{s += $2} END {printf "%.0f", s}'; }
 i=0

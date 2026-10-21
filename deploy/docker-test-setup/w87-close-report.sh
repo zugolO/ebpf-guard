@@ -399,6 +399,9 @@ bench() {
 # ── 8.7.4: состав детекта ──────────────────────────────────────────────────────
 DET_NEW=${DET_NEW:-}; DET_OLD=${DET_OLD:-}; DET_MAN=${DET_MAN:-}; NEW_RULES=${NEW_RULES:-}
 NIGHT_DATE=${NIGHT_DATE:-}; BASE_DATE=${BASE_DATE:-}; RULE_CTL=${RULE_CTL:-}; C0_IDENT=${C0_IDENT:-}; DRIFT_K=${DRIFT_K:-3}
+# Волна 9: RENAMED — attacks/renamed-rules.txt («старое<TAB>новое<TAB>основание»): rule_id БАЗЫ переводятся на новое имя до
+# сравнения (Д18: web_path_traversal_process → owasp_path_traversal иначе печатался бы «только в базе»). Пусто — без перевода.
+RENAMED=${RENAMED:-}
 IDENT_TESTS=${IDENT_TESTS:-TestDispatch_ShippedRulesetSameAlerts}
 # _registry <rule> → дата заведения из new-rules.txt (пусто — нет записи)
 _registry() { [ -s "$NEW_RULES" ] || return 0; awk -F'\t' -v r="$1" '$1 == r && $2 ~ /^[0-9]{8}$/ { print $2; exit }' "$NEW_RULES"; }
@@ -416,10 +419,23 @@ detect() {
         local T; T=$(mktemp -d)
         cnt() { jq -r '(if type == "array" then . else .alerts // [] end)[] | (.rule_id // .RuleID)' "$1" | sort | uniq -c | awk '{ print $2, $1 }' | sort; }
         cnt "$DET_NEW" > "$T/new"; cnt "$DET_OLD" > "$T/old"
+        if [ -s "$RENAMED" ]; then
+            local side ren; ren=""
+            for side in new old; do
+                awk -F'\t' 'NR == FNR { if ($0 !~ /^#/ && NF >= 2) m[$1] = $2; next } { split($0, f, " "); r = (f[1] in m) ? m[f[1]] : f[1]; c[r] += f[2] }
+                             END { for (r in c) print r, c[r] }' "$RENAMED" "$T/$side" | sort > "$T/$side.r"
+                ren="$ren$(join "$T/$side" <(awk -F'\t' '$0 !~ /^#/ && NF >= 2 { print $1 }' "$RENAMED" | sort) | awk -v s="$side" '{ printf "%s(%s) ", $1, s }')"
+                mv "$T/$side.r" "$T/$side"
+            done
+            [ -n "$ren" ] && echo "  переведено по реестру переименований: $ren"
+        fi
         if [ ! -s "$T/new" ] || [ ! -s "$T/old" ]; then cls="$cls; в одном из снимков ноль правил (новый $(wc -l < "$T/new" | tr -d ' '), база $(wc -l < "$T/old" | tr -d ' '))"
         else
             local comms; comms=$(jq -r '.[].comm' "$DET_MAN" | sort -u | jq -R . | jq -s .)
-            atk() { jq -r --arg r "$2" --argjson c "$comms" '[(if type == "array" then . else .alerts // [] end)[] | select((.rule_id // .RuleID) == $r) | select(.comm as $x | $c | index($x))] | length' "$1"; }
+            atk1() { jq -r --arg r "$2" --argjson c "$comms" '[(if type == "array" then . else .alerts // [] end)[] | select((.rule_id // .RuleID) == $r) | select(.comm as $x | $c | index($x))] | length' "$1"; }
+            atk() { local n o; n=$(atk1 "$1" "$2")
+                    if [ -s "$RENAMED" ]; then for o in $(awk -F'\t' -v n="$2" '$0 !~ /^#/ && $2 == n { print $1 }' "$RENAMED"); do n=$((n + $(atk1 "$1" "$o"))); done; fi
+                    echo "$n"; }
             for rid in $(join -v1 "$T/new" "$T/old" | awk '{ print $1 }'); do
                 a=$(atk "$DET_NEW" "$rid")
                 if [ "$a" -gt 0 ]; then
@@ -693,11 +709,24 @@ memsplit() {
                 yv = (k in sy && sy[k] != "NA") ? sprintf("%.1f", sy[k] / 1048576) : "NA"
                 printf "  %5d %9.1f %9.1f %9.1f %10s %10s %9s %9s\n", h, cur[k] / 1048576, an[k] / 1048576, fi[k] / 1048576, hv, hl, sv, yv }
             printf "SLOPES current=%s anon=%s file=%s heap_inuse=%s heap_idle_minus_released=%s stack_inuse=%s go_sys=%s\n", slope(cur), slope(an), slope(fi), slope(hi), slope2(), slope(si), slope(sy)
+            # В3 (волна 9): anon − верхняя граница резидентной памяти Go (go_sys − heap_released) по КАЖДОМУ срезу; ≤ 0 —
+            # anon целиком внутри рантайма Go (C-куча cgo не растёт)
+            nb = 0; pos = 0; mx = ""
+            for (k = 0; k <= mk; k++) { if (!(k in an) || !(k in sy) || sy[k] == "NA" || hr[k] == "NA") continue
+                d = (an[k] - (sy[k] - hr[k])) / 1048576; nb++; if (d > 0) pos++; if (mx == "" || d > mx) mx = d }
+            if (nb > 0) printf "ANONGO n=%d pos=%d max=%+.1f\n", nb, pos, mx; else print "ANONGO n=0"
         }
         function slope2(   k3, tmp, n2) { delete tmpa; for (k3 = 0; k3 <= mk; k3++) if ((k3 in hd) && hd[k3] != "NA") tmpa[k3] = hd[k3] - hr[k3]; return slope(tmpa) }
     ' "$tsv" > "$T/out"
-    grep -v '^SLOPES' "$T/out"
+    grep -v '^SLOPES\|^ANONGO' "$T/out"
     local sl; sl=$(grep '^SLOPES' "$T/out" | sed 's/^SLOPES //')
+    local ag; ag=$(grep '^ANONGO' "$T/out")
+    case "$ag" in
+        *"n=0"|"") echo "  8.1.1b: СПРАВКА anon − Go-резидентное — не считается (нет go_memstats_sys/heap_released в срезах)" ;;
+        *) echo "$ag" | awk '{ split($2, a, "="); split($3, b, "="); split($4, c, "=");
+               printf "  8.1.1b: СПРАВКА anon − Go-резидентное (go_sys − heap_released): макс %s МиБ, срезов с anon > Go: %d из %d%s\n", c[2], b[2], a[2],
+                   (b[2] == 0 ? " — anon целиком внутри рантайма Go (В3)" : " — часть anon вне рантайма Go") }' ;;
+    esac
     rm -rf "$T"
     case "$sl" in *current=NA*|*anon=NA*|*file=NA*) cls="$cls; снимков после часа прогрева меньше трёх (всего $n) — наклон не считается" ;; esac
     if [ -n "$cls" ]; then echo "НЕИЗМЕРИМ: 8.1.1r НЕИЗМЕРИМ (класс НАЗВАН:${cls#;}; наклоны МиБ/ч после 1 ч: $sl)"
@@ -705,7 +734,8 @@ memsplit() {
 }
 
 # ── 8.7.Д: статус части Д из plan.md ───────────────────────────────────────────
-PLAN=${PLAN:-}; REPORTS=${REPORTS:-}; DEFER_ALLOWED=${DEFER_ALLOWED:-"Д4b Д15 Д17 Д18"}
+PLAN=${PLAN:-}; REPORTS=${REPORTS:-}; # пустое DEFER_ALLOWED="" — «отложить нельзя ничего» (9.Д); не задано — перечень 8.7.Д
+DEFER_ALLOWED=${DEFER_ALLOWED-"Д4b Д15 Д17 Д18"}
 # Волна 9: тот же эмиттер судит 9.Д по своей таблице (DTAG=D9-STATUS DLABEL=9.Д).
 DTAG=${DTAG:-D-STATUS}; DLABEL=${DLABEL:-8.7.Д}
 dlist() {

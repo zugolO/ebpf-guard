@@ -35,7 +35,7 @@ CPU_LIMIT=${CPU_LIMIT:-}; BULK_MIX=${BULK_MIX:-$MIX}
 #   под — core (как в поставке: без тега rego, policy.rego.enabled=false); хост — full ($SRC/build/ebpf-guard = make build,
 #   -tags rego) с policy.rego.enabled=true, как будет ночью. Оба плеча A/B одной сборкой. Рантайм-флаги rego_built/
 #   rego_active сверяются с намерением ниже (die при расхождении), печатаются в driver.log и $OUT/build.txt.
-POD_TAGS=${POD_TAGS-}; HOST_REGO=${HOST_REGO:-1}; export HOST_REGO
+POD_TAGS=${POD_TAGS-}; HOST_REGO=${HOST_REGO:-1}; export HOST_REGO POD_TAGS
 HERE=$(cd "$(dirname "$0")" && pwd)
 SERVICE=ebpf-guard-test.service
 NS=ebpf-guard; REL=e88; POD_TOKEN=w88podtoken0123456789abcdef01234567; POD_STATE=/var/lib/ebpf-guard-pod
@@ -120,6 +120,9 @@ c = yaml.safe_load(open(sys.argv[1]))
 assert c["server"]["enable_pprof"] is True
 c["server"]["pprof_stage_labels"] = True
 c["server"]["pprof_rule_labels"] = False
+# Волна 9 (Д15): под — core; config-test.yaml несёт policy.rego.enabled=true для хоста full, поду — выключить явно
+import os
+c.setdefault("policy", {}).setdefault("rego", {})["enabled"] = "rego" in os.environ.get("POD_TAGS", "")
 yaml.safe_dump(c, open(sys.argv[2], "w"), allow_unicode=True, sort_keys=False)
 PY
     mkdir -p "$POD_STATE"; echo 0 > "$POD_STATE/observer-root-pid"

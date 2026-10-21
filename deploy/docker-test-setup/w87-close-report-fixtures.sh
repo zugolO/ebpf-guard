@@ -164,6 +164,12 @@ w 8.7.4-g0-small '^НЕИЗМЕРИМ: 8\.7\.4 .*не на дампе w86-b' "$(
 w 8.7.4-no-snapshot '^НЕИЗМЕРИМ: 8\.7\.4 .*нет или не разобран снимок алертов' "$(det "$T/нет")"
 w 8.7.4-two-tests-second-missing '^ПРОВАЛЕН: 8\.7\.4 .*тождество на дампе не PASS: TestP1_Identity' "$(IDENT_TESTS="TestDispatch_ShippedRulesetSameAlerts TestP1_Identity" det "$NEWOK")"
 w 8.7.4-no-night-date '^НЕИЗМЕРИМ: 8\.7\.4 .*дата ночи не задана' "$(ND= det "$NEWOK")"
+# волна 9: база (ночь 8.7) — под старым именем, ночь 9 — под новым (Д18); без реестра переименований это «потеря»
+OLDREN=$T/old-ren.json; mkal "$OLDREN" "r_a:nc:3 r_b:apache2:2 web_path_traversal_process:apache2:1"
+NEWREN=$T/new-ren.json; mkal "$NEWREN" "r_a:nc:3 r_b:apache2:2 owasp_path_traversal:apache2:1"
+REN=$T/renamed.txt; printf '# старое\tновое\tоснование\nweb_path_traversal_process\towasp_path_traversal\t9-A/Д18\n' > "$REN"
+w 8.7.4-rename-without-registry '^ПРОВАЛЕН: 8\.7\.4 .*только в базе: web_path_traversal_process\(атака 1\)' "$(OLD=$OLDREN det "$NEWREN")"
+w 8.7.4-rename-with-registry '^ДОСТИГНУТО: 8\.7\.4 ' "$(OLD=$OLDREN RENAMED=$REN det "$NEWREN")"
 
 # ── 8.7.5 / 8.6.6: поды ───────────────────────────────────────────────────────
 PSHA=abcdef123456
@@ -321,6 +327,8 @@ w 8.7.Д-real-plan-parses '^(ДОСТИГНУТО|ПРОВАЛЕН): 8\.7\.Д ' 
 { cat "$T/p-open"; echo "<!-- D9-STATUS-BEGIN -->"; echo "| Д | статус | основание |"; echo "|---|---|---|"; echo "| Д1′ | ночь:8.1.1 | ночью |"; echo "| Д17 | закрыт | код |"; echo "<!-- D9-STATUS-END -->"; } > "$T/p-9"
 w 9.Д-own-table '^ДОСТИГНУТО: 9\.Д .*строк части Д 2: закрыто 2' "$(DTAG=D9-STATUS DLABEL=9.Д PLAN=$T/p-9 REPORTS=$REP em dlist)"
 w 9.Д-8.7-table-untouched '^ПРОВАЛЕН: 8\.7\.Д .*Д2 открыта' "$(dl "$T/p-9")"
+printf '<!-- D9-STATUS-BEGIN -->\n| Д | статус | основание |\n|---|---|---|\n| Д15 | отложено | x |\n<!-- D9-STATUS-END -->\n' > "$T/p-9d"
+w 9.Д-empty-defer-means-none '^ПРОВАЛЕН: 9\.Д .*Д15 отложено без решения владельца' "$(DEFER_ALLOWED="" DTAG=D9-STATUS DLABEL=9.Д PLAN=$T/p-9d REPORTS=$REP em dlist)"
 w 9.Д-real-plan-parses '^(ДОСТИГНУТО|ПРОВАЛЕН): 9\.Д ' "$(DTAG=D9-STATUS DLABEL=9.Д PLAN=$HERE/../../plan.md REPORTS=$REP em dlist)"
 
 
@@ -389,6 +397,7 @@ if [ "${1:-}" = --mutate ]; then
     mut detect-only-old  's/\[ -z "\$only_old" \] || fail=/true || fail=/'
     mut detect-registry  's/elif \[ -n "\$d" \]; then only_new=/elif false; then only_new=/'
     mut detect-ctl-fail  's/\[ "\$failn" = 0 \] || fail=/true || fail=/'
+    mut detect-renamed   's/if \[ -s "\$RENAMED" \]; then$/if false; then/'
     mut detect-ident     's/grep -aq -- "--- PASS: \$t " "\$C0_IDENT" || grep -aq -- "--- PASS: \$t\\$" "\$C0_IDENT" || tnot=/true || tnot=/'
     mut pod-sha          's/if \[ -n "\$POD_SHA" \] \&\& \[ "\$sha" != "\$POD_SHA" \]; then/if false; then/'
     mut pod-dup          's/case " \$seen " in \*" \$key "\*)/case " $seen " in ZZZ)/'
@@ -409,6 +418,7 @@ if [ "${1:-}" = --mutate ]; then
     mut chain-proc-reads 's/fail="\$fail; (б) чтений/: "$fail; (б) чтений/'
     mut ref-step         's/STEP_MIB=${STEP_MIB:-1}/STEP_MIB=${STEP_MIB:-100}/'
     mut ref-tls          's/(\^|,)tls(,|\$)/(^|,)nothing(,|$)/'
+    mut dlist-defer-empty 's/DEFER_ALLOWED=\${DEFER_ALLOWED-"Д4b/DEFER_ALLOWED=${DEFER_ALLOWED:-"Д4b/'
     mut dlist-defer      's/\*" \$id "\*) echo "  \$id: отложено решением/*) echo "  $id: отложено решением/'
     mut dlist-open       's/открыта) echo "  \$id: ОТКРЫТА — \$why"; fail=/открыта) echo "  $id: x"; : /'
     mut dlist-night      's/ДОСТИГНУТО) echo "  \$id: закрыт ночью/*) echo "  $id: закрыт ночью/'

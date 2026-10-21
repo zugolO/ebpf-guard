@@ -54,6 +54,13 @@ rules:
   path: "/opt/ebpf-guard/rules/"
   hot_reload: true
 
+# Волна 9 (Д15): умолчание Rego — off; хост стенда — сборка full (make build, -tags rego), слой включается явно, как
+# ночью. Под стенда — core: пайплайны выключают слой в копии конфига пода (rego_active=0 — вход 9.2).
+policy:
+  rego:
+    enabled: true
+    rules_dir: "/opt/ebpf-guard/rules/rego"
+
 correlator:
   # 5.9a (находки №27/№28): idle-run.sh и процессы, которые оно порождает
   # (curl/ps/grep/awk), давали 71% измеренного idle-шума — измеритель мерил

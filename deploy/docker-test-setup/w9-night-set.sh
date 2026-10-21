@@ -18,7 +18,7 @@ EXPECT_NR=${EXPECT_NR:-36}
 IDLE_SECS=${IDLE_SECS:-43200}
 EST_AFTER_IDLE_SECS=${EST_AFTER_IDLE_SECS:-27600}   # 8.7: 20 400 + пара 8.8.7 (≈ 70 мин) + лестница В6 (≈ 50 мин)
 LAUNCH=/root/night-9-at.sh
-W9B87=${W9_BASE87:-/var/lib/night-9-night}
+W9B87=${W9_BASE87:-/var/lib/night-8.7-night}
 ABSRC=${AB_BASE_SRC:-/root/w9b-src}
 target=$(date -u -d "$DAY $START" +%s); now=$(date +%s)
 [ "$target" -gt "$now" ] || { echo "die: старт $DAY $START UTC уже прошёл (сейчас $(date -u +%FT%T))"; exit 1; }
